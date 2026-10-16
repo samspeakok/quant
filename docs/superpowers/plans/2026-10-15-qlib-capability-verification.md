@@ -30,11 +30,27 @@
 - **mlflow 集成缺口（实测崩溃，非推测）**：mlflow 3.x 把**文件系统 tracking 后端置为维护模式并直接抛 `MlflowException`**，而 qlib 0.9.7 默认走文件后端。任何调用 `model.fit()` 的入口（Task 8 测试、**Task 10 研究脚本**）都必须同时满足：① 环境变量 `MLFLOW_ALLOW_FILE_STORE=true`；② 通过 **qlib 自己的 `R.set_uri(<本地路径>)`** 指定目录 —— 不能用 `mlflow.set_tracking_uri()`，因为 `qlib/workflow/recorder.py:337` 起 recorder 时会用 ExpManager 的 default_uri 覆写回去。
 - **`LGBModel.predict(dataset, segment=...)` 返回 Series**，对它做 `.iloc[:, 0]` 会抛 `IndexError: Too many indexers`（实测）。共享 `predictions` fixture 以 DataFrame（列名 `score`）交付。
 - **`Booster.num_trees()` 在 qlib+lightgbm 这条路径上会误导**：实测它返回 2，而 evals 曲线证明 20 轮全部训练完成。判断"早停是否起作用"要看 `best_iteration` 与逐轮 valid 曲线，不能看 `num_trees()`。
-- **回测 API 实测形态（合成信号预飞行得出，2026-10-16）**：`backtest(...)` 返回 `(portfolio, indicator)`，二者都以 `"1day"` 为键；`portfolio["1day"][0]` 是报告 DataFrame，列名实测为 `account return total_turnover turnover total_cost cost value cash bench` —— **基准列叫 `bench` 而不是 `benchmark`**；`portfolio["1day"][1]` 是**按日期索引的 dict**（不是 list），统计持仓数必须取 `.values()`。20 个交易日回测耗时约 60 秒。
+- **回测 API 实测形态（合成信号预飞行得出，2026-10-16）**：`backtest(...)` 返回 `(portfolio, indicator)`，二者都以 `"1day"` 为键；`portfolio["1day"][0]` 是报告 DataFrame，列名实测为 `account return total_turnover turnover total_cost cost value cash bench` —— **基准列叫 `bench` 而不是 `benchmark`**；`portfolio["1day"][1]` 是**按日期索引的 dict**（不是 list），统计持仓数必须取 `.values()`。**耗时（2026-10-16 定种子后实测更正）**：整段 test
+  （181 个交易日）的回测进度条实测 **约 8 秒**跑完。预飞行记的"20 日 ≈60 秒"把建库/建 exchange
+  的一次性 warm-up 算进了单日成本，按它预算会高估一个数量级 —— `tests/test_06_backtest.py`
+  整个文件（含一次模型 fit + 三次整段回测）实测 241 秒。
+- **`D.calendar()` 返回 numpy 数组，不是 list**：`assert seg_days` 这类写法会当场
+  `ValueError: The truth value of an array with more than one element is ambiguous`（本机实测）。
+  判空必须写 `len(...) > 0`；要拿集合比对时先按有序列表断言再降为 set。
+- **`backtest()` 的返回值是二元组**：`_unwrap` 之类的解包函数必须吃 `ret[0]`。写成
+  `_unwrap(_run(...))` 会把整个元组传进去，`list(portfolio)` 变成 `[{'1day': ...}, Indicator]`，
+  于是 `keys == ["1day"]` 报"A index 0 diff"这种看着像库变了、其实是调用方写错的假现场。
 - **信号 MultiIndex 的 `datetime` 层必须是 `pd.Timestamp`**：传字符串层会在 `TopkDropoutStrategy`/回测内部报 `TypeError: Level type mismatch: 2025-12-31 00:00:00`。`DatasetH` 产出的索引本来就是 Timestamp，所以这个坑只在自行构造信号时出现。
 - **`LGBModel` 默认不可复现（实测）**：qlib 的 baseline 参数开了 `subsample=0.8789` 与 `colsample_bytree=0.8879`（逐树行/列抽样）却没有 `seed`。同一份库同一套参数，两次运行 `best_iteration` 分别是 **2 和 52**，test 段累计收益随之漂移 **20.7 个百分点**。**任何调用 `LGBModel` 的地方都必须显式 `seed=<int>` 且 `deterministic=True`**（后者强制 row-wise 划分，否则多线程仍抖）。`conftest.trained_model` 已按此设置（`seed=66`）。
 - **`TopkDropoutStrategy` 允许持仓超过 `topk`（实测）**：最大持仓 **33 = topk(30) + n_drop(3)**。它每天最多卖 `n_drop` 只、再把仓位补到 `topk`，遇到停牌/跌停卖不掉时持仓会短暂超限。判据应写成 `<= topk + n_drop`，`<= topk` 是拿直觉当标准、必失败。
-- **报告列的单位不对称（实测，`qlib/backtest/report.py:209-210`）**：`cost` 是**当日费率**，`total_cost` 是**累计金额**，二者不是累加关系（`total_cost[-1] == sum(cost)` 差出账户量级 ≈3.33e6）；而 `total_turnover[-1] == sum(turnover)` 成立（换手按率累计）。写自洽检查前必须先确认单位。
+- **报告列的单位（实测 + `qlib/backtest/report.py:81-84` 的字段注释为准）**：`turnover` 与 `cost` 是**率**，
+  `total_turnover` 与 `total_cost` 都是**金额**（注释原文：`total turnover for each trade time` /
+  `total trade cost for each trade time`）。所以任何 `total_X[-1] == sum(X)` 的累加自洽检查从定义上就不成立：
+  实测 `total_cost[-1]=3.12e6` 对 `sum(cost)=0.027`、`total_turnover[-1]=3.17e9` 对 `sum(turnover)=27.7`，
+  都差六个量级。**本节原写过"total_turnover 是按率累计的、与 sum(turnover) 相等"，那条是错的**，
+  它在定种子后的第一次全量运行里当场变红才暴露。可用的单位自洽判据是
+  `total_cost[-1] / total_turnover[-1]` = 每单位成交额的混合费率，必须落在配置的 `[open_cost, close_cost]` 内
+  （实测 0.00098472 ∈ [0.0005, 0.0015]），且两个 total_* 列都单调不回退。
 - **`SEGMENTS` 的端点是日历日而非交易日**：`2026-01-01` 是元旦休市，回测报表首日实测为 `2026-01-05`。任何"覆盖整段"的判据必须对齐 `D.calendar(start,end)` 的首末交易日，并另加 `len(report) == 区间交易日数` 防止靠缩窗口变便宜。
 - **与源库比对日历必须带上界**：主系统每天收盘后继续写入新交易日（实测次日多出 `2026-10-15`）。若 `src` 只有下界，`cal == src` 会在建库之后每天失败。正确不变量是"以库自身最后一天为界，一天不缺、一天不许多"。
 - Alpha158 的标签是 `Ref($close, -2)/Ref($close, -1) - 1`，**设计上就前看两天**。看到"用了未来数据"不要当 bug 修掉，它是预测目标本身。
