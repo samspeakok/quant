@@ -299,9 +299,9 @@ git add config/__init__.py config/settings.py tests/__init__.py tests/test_00_sy
 - Consumes: `settings.DUCKDB_PATH`、`settings.SQL_FILTER`、`settings.classify_symbol`、`settings.to_qlib_code`、`settings.EXPORT_CSV_DIR`
 - Produces:
   - `export_bars.connect_readonly() -> duckdb.DuckDBPyConnection`
-  - `export_bars.load_bars(con) -> pandas.DataFrame` —— 列 `symbol, date, open, high, low, close, volume, amount, asset`，`date` 为 `YYYY-MM-DD` 字符串，已按 classify 过滤掉 `None`
-  - `export_bars.HygieneReport` dataclass：`rows_in, rows_out, symbols, dropped_by_classify, dup_rows, bad_price_rows`
-  - `export_bars.write_csvs(df, out_dir) -> HygieneReport`
+  - `export_bars.load_bars(con) -> tuple[pandas.DataFrame, int]` —— 列 `symbol, date, open, high, low, close, volume, amount, asset`，`date` 为 `YYYY-MM-DD` 字符串，已按 classify 过滤掉 `None`；第二个返回值是 **classify 丢弃之前** 的行数。若只返回帧而把 `rows_in` 在丢行后才测，`dropped_by_classify` 会永远是 0 —— 一个会说谎的体检计数器，正是本层约束禁止的
+  - `export_bars.HygieneReport` dataclass：`rows_in, rows_out, symbols, dropped_by_classify, dup_rows, bad_price_rows`；须满足守恒 `rows_in - dup_rows - bad_price_rows == rows_out`
+  - `export_bars.write_csvs(df, out_dir, rows_in: int) -> HygieneReport` —— 写之前先删除 `out_dir` 下旧的 `*.csv`（否则会留下上一轮的全历史文件被 dump_bin 当现况吞掉），写完断言文件数等于标的数
   - `export_bars.main() -> int`
 
 - [ ] **Step 1: 先写"只读约束"的失败测试**
