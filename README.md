@@ -44,8 +44,10 @@ docs/superpowers/      设计文档与 11 任务计划（含全部实测坑）
 `pytest` 默认就是严格 warning 模式（`pytest.ini` 里 `filterwarnings = error`），只豁免一条点名的
 上游噪音，理由写在 `pytest.ini` 注释里。想看完整警告列表：`pytest -W default`。
 
-实测状态（2026-10-16）：`pytest tests/` 在严格模式下 **102 passed / 535s**，
+实测状态（2026-10-16）：`pytest tests/` 在严格模式下 **102 passed**，
 除那一条被点名的上游 RuntimeWarning 外**没有任何其他警告**。
+计时两次实测分别是 **535s** 与 **831s**（同一份内容，差别只在机器当时负载 ——
+后者与研究脚本同时在跑），所以别把任何一次当基准耗时。
 配置本身也做了变异验证（故意注入一条 `DeprecationWarning` → 当场 FAILED），
 所以"error 模式生效"不是读配置读出来的，是试出来的。
 
