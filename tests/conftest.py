@@ -52,7 +52,7 @@ def alpha158_handler(qlib_ready):
 
     end_time 用 SEGMENTS["test"][1] 而不是简报的 SEGMENTS["valid"][1]：DatasetH.prepare(seg)
     只是在 handler 已经载入内存的那一帧上按日期切片，不会回头再读数据层
-    （qlib/data/dataset/__init__.py:176 `_prepare_seg` -> `self.handler.fetch(slc)`）。
+    （qlib/data/dataset/__init__.py:171 `_prepare_seg` -> :181 `self.handler.fetch(slc)`）。
     按简报只载到 2025-12-31 时，test 段（2026-01-01..2026-09-30）实测直接空掉：
     `AssertionError: test is empty`，并连带 `ValueError: min()/max() iterable argument is empty`。
     留出尾部 HELDOUT_START 之后仍然不载进来。
