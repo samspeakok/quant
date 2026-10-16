@@ -1623,6 +1623,14 @@ def main() -> int:
 - Annual return: {metrics['annual_return']:.2%} | annual excess: {metrics['annual_excess']:.2%}
 - Max drawdown: {metrics['max_drawdown']:.2%} | volatility: {metrics['volatility']:.2%}
 
+## Reference anchor (measured, not assumed)
+
+A **pure random ranking** over the same `cn_stocks` universe, same topk/n_drop and costs,
+produced cum_return -0.96% / cost 0.39% / mean daily turnover 21.7% over 20 trading days
+(see ledger: tie-break pre-flight). The model's backtest must be compared against this
+before any statement about skill; if it is not clearly ahead, the finding is
+"indistinguishable from random".
+
 ## Interpretation caveats
 - The label is `Ref($close,-2)/Ref($close,-1)-1`, a two-day-forward return by design.
 - Costs are the configured 5bp open / 15bp close; slippage is not modelled.
