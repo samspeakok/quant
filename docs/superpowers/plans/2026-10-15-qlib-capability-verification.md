@@ -27,6 +27,9 @@
 - 日期区间（2026-10-15 依实测数据重定，见下方"数据现实"）：train 2025-01-01~2025-08-31、valid 2025-09-01~2025-12-31、test 2026-01-01~2026-09-30，`HISTORY_START = 2024-08-05`。**每个区间右端都留出的尾部数据（2026-10-01~2026-10-14）不进任何区间**，保持一段真正的样本外参照。
 - **数据现实（实测，推翻了初版计划的区间设定）**：本库 A 股日线只从 2021-08-26 开始，且 2021/2022/2023 各只有 **1** 只标的，2024 年 55 只，2025 年 347 只，2026 年 642 只。ETF 有 2007→2026 的长历史但每年仅 8~10 只；指数 1990→2026 共 10 只且不可交易。因此**任何跨多年的股票训练窗口在这份数据上都不存在**，回测性能数字不具备可信度，本轮六层的判据是"机制是否真的跑通"，不是"策略是否赚钱"。补历史数据是后续独立工程。
 - 已核实的真实 API 参数名（不要按网络资料改回旧写法）：`dump_bin.py` 用 **`--data_path`**（不是 `--csv_path`）；`qlib.backtest.backtest(start_time, end_time, strategy, executor, benchmark, account, exchange_kwargs, pos_type)`；`DatasetH.prepare(segments, col_set=..., ...)`；`Alpha158.get_feature_config()` 返回 `([ops], [names])` 二元组。
+- **mlflow 集成缺口（实测崩溃，非推测）**：mlflow 3.x 把**文件系统 tracking 后端置为维护模式并直接抛 `MlflowException`**，而 qlib 0.9.7 默认走文件后端。任何调用 `model.fit()` 的入口（Task 8 测试、**Task 10 研究脚本**）都必须同时满足：① 环境变量 `MLFLOW_ALLOW_FILE_STORE=true`；② 通过 **qlib 自己的 `R.set_uri(<本地路径>)`** 指定目录 —— 不能用 `mlflow.set_tracking_uri()`，因为 `qlib/workflow/recorder.py:337` 起 recorder 时会用 ExpManager 的 default_uri 覆写回去。
+- **`LGBModel.predict(dataset, segment=...)` 返回 Series**，对它做 `.iloc[:, 0]` 会抛 `IndexError: Too many indexers`（实测）。共享 `predictions` fixture 以 DataFrame（列名 `score`）交付。
+- **`Booster.num_trees()` 在 qlib+lightgbm 这条路径上会误导**：实测它返回 2，而 evals 曲线证明 20 轮全部训练完成。判断"早停是否起作用"要看 `best_iteration` 与逐轮 valid 曲线，不能看 `num_trees()`。
 - Alpha158 的标签是 `Ref($close, -2)/Ref($close, -1) - 1`，**设计上就前看两天**。看到"用了未来数据"不要当 bug 修掉，它是预测目标本身。
 
 ## 文件结构
@@ -1462,6 +1465,8 @@ def test_returns_are_not_identical_to_the_benchmark(backtest_result):
 
 Expected: 4 passed。若 `TopkDropoutStrategy` 不接受 DataFrame 形式的 signal，改为传入 `pd.Series`；若 `indicator[key][1]` 结构不同，先 `print(indicator)` 再据实断言 —— **不许**把断言改成 `assert True` 放行。
 
+**必须额外实测披露的一条（本层结论可信度的前提）**：模型在测试段只产出约 **30 个不同分值**，而 `topk=30`，因此**持仓名单几乎完全由并列分数的打破顺序决定**。要量出这种敏感性：对同一批 predictions 施加不同的 tie-break（至少两种，例如按标的名升序 / 降序、或加入一个微量抖动列），分别跑回测并报告**累计收益与换手率的跨度**。该跨度必须写进 `FINDINGS.md`，跨度大就说明这份回测曲线不携带排序信息。这是度量，不是断言门槛——但如果实测显示换手率跨度极大而报告里只字未提，视为本层未完成。
+
 - [ ] **Step 3: 全量回归**
 
 ```bash
@@ -1498,6 +1503,7 @@ git add tests/test_06_backtest.py
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1520,15 +1526,20 @@ ACCOUNT = 100_000_000
 
 
 def main() -> int:
+    # mlflow 3.x 对文件系统后端直接抛 MlflowException；必须在 import mlflow 之前开这个官方 opt-out，
+    # 且之后只能用 qlib 自己的 R.set_uri() 指定目录（mlflow.set_tracking_uri 会被 recorder 覆写回去）
+    os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
     import qlib
     from qlib.backtest import backtest
     from qlib.contrib.data.handler import Alpha158
     from qlib.contrib.model.gbdt import LGBModel
     from qlib.contrib.strategy import TopkDropoutStrategy
     from qlib.data.dataset import DatasetH
+    from qlib.workflow import R
     from scipy.stats import spearmanr
 
     qlib.init(provider_uri=str(QLIB_DIR), region=REGION)
+    R.set_uri(str(ARTIFACTS / "mlruns"))
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
 
     handler = Alpha158(
