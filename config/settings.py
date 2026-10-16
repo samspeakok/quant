@@ -11,8 +11,10 @@ ARTIFACTS = ROOT / "artifacts"
 REGION = "cn"
 FREQ = "day"
 
-# 非 CN 市场的 10 个标的（US/HK/KR/GLOBAL 共约 3.5 万行）会把它们各自的
-# 交易日并进 calendars/day.txt，制造出数千个所有 A 股全为 NaN 的幽灵交易日。
+# 非 CN 市场的 10 个标的（US/HK/KR/GLOBAL）会把它们各自的交易日并进 calendars/day.txt，
+# 制造出所有 A 股全为 NaN 的幽灵交易日，所以必须按 market='CN' 过滤。
+# 行数实测于 2026-10-16（只读查询）：全库 465,013 行，其中非 CN 45,413 行、
+# CN+1d+qfq 314,683 行（再叠加 HISTORY_START 之后落到导出闸门的 194,738 行）。
 SQL_FILTER = "frequency = '1d' AND adjust = 'qfq' AND market = 'CN'"
 
 _SH_STOCK = ("600", "601", "603", "605", "688", "689")

@@ -1,0 +1,12 @@
+# 本机 venv 实测版本（pip freeze 里挑出直接依赖，非上游推荐矩阵）。
+# 关键点：pyqlib 0.9.7 有 cp312-win_amd64 的官方 wheel，Windows 原生装得上；
+# numpy/pandas 跑在比 qlib 官方矩阵更新的 2.x/3.x 上，二进制读取路径已交叉校验正确。
+pyqlib==0.9.7
+numpy==2.5.4
+pandas==3.0.6
+lightgbm==4.7.0
+duckdb==1.5.5
+scipy==1.18.1
+pyarrow==25.0.1
+mlflow==3.17.1
+pytest==9.1.1
