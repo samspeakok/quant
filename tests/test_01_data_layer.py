@@ -39,13 +39,19 @@ def test_calendar_contains_no_foreign_trading_days(db):
         f"乱序位 {[i for i in range(1, len(cal_list)) if cal_list[i] <= cal_list[i - 1]][:5]}"
     )
     cal = {d.strftime("%Y-%m-%d") for d in cal_list}
+    # 比对窗口必须由**库自身的截止日**界定，不能只给下界。主系统每天收盘后继续往 bars 里写新
+    # 交易日（实测 2026-10-16 就多出了 2026-10-15），若 src 无上界，则 `cal == src` 会在建库
+    # 之后的每一天都红 —— 那不是数据坏了，是库合法地落后。加了上界之后这条断言依然双向严格：
+    # 截止日之内一天不许缺，一天不许多。重跑 tools/ 建库即可把上界推进到新日期。
+    cutoff = cal_list[-1].strftime("%Y-%m-%d")
     src = {
         r[0]
         for r in db.execute(
             "SELECT DISTINCT strftime(CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE), '%Y-%m-%d') FROM bars "
             "WHERE frequency='1d' AND adjust='qfq' AND market='CN' "
-            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) >= ?",
-            [HISTORY_START],
+            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) >= ? "
+            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) <= CAST(? AS DATE)",
+            [HISTORY_START, cutoff],
         ).fetchall()
     }
     ghost = cal - src
