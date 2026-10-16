@@ -98,7 +98,7 @@ ARTIFACTS = ROOT / "artifacts"
 REGION = "cn"
 FREQ = "day"
 
-# 非 CN 市场的 10 个标的（US/HK/KR/GLOBAL 共约 3.5 万行）会把它们各自的
+# 非 CN 市场的 10 个标的（US/HK/KR/GLOBAL 共 45,413 行）会把它们各自的
 # 交易日并进 calendars/day.txt，制造出数千个所有 A 股全为 NaN 的幽灵交易日。
 SQL_FILTER = "frequency = '1d' AND adjust = 'qfq' AND market = 'CN'"
 
@@ -106,7 +106,10 @@ _SH_STOCK = ("600", "601", "603", "605", "688", "689")
 _SH_ETF = ("51", "52", "56", "58")
 _SZ_STOCK = ("000", "001", "002", "003", "300", "301", "302")
 _SZ_ETF = ("15", "16")
-_BJ_STOCK = ("43", "83", "87", "88", "89", "92")
+# 899xxx 是北证系列指数（899001 即北证50），必须先于股票段判定，否则指数会被
+# 分进可交易池 —— 指数没有可成交价，回测会凭空抬高收益。
+_BJ_INDEX = ("899",)
+_BJ_STOCK = ("43", "83", "87", "88", "92")
 
 
 def classify_symbol(symbol: str) -> str | None:
@@ -128,6 +131,8 @@ def classify_symbol(symbol: str) -> str | None:
         if code.startswith(_SZ_ETF):
             return "etf"
     elif exch == "BJ":
+        if code.startswith(_BJ_INDEX):
+            return "index"
         if code.startswith(_BJ_STOCK):
             return "stock"
     return None
@@ -178,6 +183,9 @@ from config.settings import POOLS, SEGMENTS, classify_symbol, to_qlib_code
         # 北交所
         ("832004.BJ", "stock"),
         ("430139.BJ", "stock"),
+        ("889117.BJ", "stock"),
+        # 北证系列指数：899xxx 必须是 index，不能落进可交易股票池
+        ("899001.BJ", "index"),
         # ETF：15/16 开头在深市，51/56/58 与 52 开头在上海
         ("159611.SZ", "etf"),
         ("510300.SH", "etf"),
