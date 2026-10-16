@@ -1,6 +1,6 @@
 import pytest
 
-from config.settings import POOLS, SEGMENTS, classify_symbol, to_qlib_code
+from config.settings import HELDOUT_START, POOLS, SEGMENTS, classify_symbol, to_qlib_code
 
 
 @pytest.mark.parametrize(
@@ -72,10 +72,19 @@ def test_segments_are_ordered_and_disjoint():
     assert SEGMENTS["valid"][1] < SEGMENTS["test"][0]
 
 
-def test_2026_is_excluded_from_every_segment():
-    """2026 年数据留作样本外，任何区间的右端点都不得触及它。"""
+def test_segments_are_the_exact_measured_windows():
+    """钉住四个端点。只断言顺序的话，整段窗口平移一年也照样全绿。"""
+    assert SEGMENTS == {
+        "train": ("2025-01-01", "2025-08-31"),
+        "valid": ("2025-09-01", "2025-12-31"),
+        "test": ("2026-01-01", "2026-09-30"),
+    }
+
+
+def test_heldout_tail_is_excluded_from_every_segment():
+    """数据到 2026-10-14，这段尾部不进任何区间，留作样本外参照。"""
     for name, (_start, end) in SEGMENTS.items():
-        assert end < "2026-01-01", f"{name} leaks into out-of-sample year"
+        assert end < HELDOUT_START, f"{name} leaks into the held-out tail"
 
 
 def test_pools_map_to_the_three_classifiers():
