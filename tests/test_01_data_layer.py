@@ -132,8 +132,12 @@ def test_close_matches_source_database(db, pool_members):
     assert not thin, f"{len(thin)} sampled instruments skipped for <10 Qlib trading days: {thin[:10]}"
 
     checked = 0
-    # 每一档 skip 都按原因计数并留下 offending 样本，供最终断言的报错原文使用。
-    skipped: dict[str, list[str]] = {"qlib_empty_frame": [], "qlib_nan_placeholder": []}
+    # 控制器 round-2 裁定：**已验证的 NaN 配对**（Qlib=NaN ⟺ 源库 0 行）是一次**比对通过**，
+    # 不是 skip。它计入 checked，并单列 nan_verified 供报错原文展示；否则一个合法的停牌日
+    # 一旦被抽中，就会在完全正确的数据上把 `checked == len(picked)` 打成假报警。
+    nan_verified: list[str] = []
+    # 剩下的 skip 档只有空表。每一档都留 offending 样本供最终断言的报错原文使用。
+    skipped: dict[str, list[str]] = {"qlib_empty_frame": []}
     for code, day in picked:
         got = D.features([code], ["$close"], start_time=day, end_time=day)["$close"]
         if got.empty:
@@ -155,7 +159,10 @@ def test_close_matches_source_database(db, pool_members):
         #   qlib=数值 ⟹  源库当天必须有一行且数值相等（原断言，容差 1e-6 未动）
         if pd.isna(qlib_v):
             assert not want, f"{code} {day}: qlib reads NaN but the source database has a bar"
-            skipped["qlib_nan_placeholder"].append(f"{code} {day}")
+            # 到这里即 Qlib=NaN 且源库 0 行 —— 停牌日双向对齐**验证通过**：计入 checked，
+            # 记进可见的 nan_verified，绝不再算 skip。
+            nan_verified.append(f"{code} {day}")
+            checked += 1
             continue
         assert want, f"{code} {day}: qlib has a bar but the source database has none"
         # (symbol, day) 必须唯一确定一根 bar：实测今日 0 例重复。多行意味着源库同一天有
@@ -170,8 +177,9 @@ def test_close_matches_source_database(db, pool_members):
 
     breakdown = "; ".join(f"{reason}={len(hits)}{hits[:5] if hits else ''}" for reason, hits in skipped.items())
     assert checked == len(picked), (
-        f"picked={len(picked)} compared={checked} skipped={len(picked) - checked} -> {breakdown}. "
-        f"每个抽样对都必须完成数值比对；skip 不是「正常停牌」的通行证，而是本层没验完。"
+        f"picked={len(picked)} compared={checked} (其中 nan_verified={len(nan_verified)}) "
+        f"skipped={len(picked) - checked} -> {breakdown}. "
+        f"每个抽样对都必须完成数值比对或已验证的 NaN 停牌配对；skip 不是「正常停牌」的通行证，而是本层没验完。"
     )
 
 
