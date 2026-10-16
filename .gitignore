@@ -1,0 +1,17 @@
+# Virtualenv
+.venv/
+
+# Generated Qlib binary data store (rebuilt by tools/build_qlib_data.py)
+qlib_data/
+
+# Intermediate CSV export and research outputs
+tools/_export/
+artifacts/
+mlruns/
+
+# Upstream Qlib checkout: vendored for dump_bin.py and source reading only
+vendor/
+
+__pycache__/
+.pytest_cache/
+*.pyc
