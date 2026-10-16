@@ -32,6 +32,11 @@
 - **`Booster.num_trees()` 在 qlib+lightgbm 这条路径上会误导**：实测它返回 2，而 evals 曲线证明 20 轮全部训练完成。判断"早停是否起作用"要看 `best_iteration` 与逐轮 valid 曲线，不能看 `num_trees()`。
 - **回测 API 实测形态（合成信号预飞行得出，2026-10-16）**：`backtest(...)` 返回 `(portfolio, indicator)`，二者都以 `"1day"` 为键；`portfolio["1day"][0]` 是报告 DataFrame，列名实测为 `account return total_turnover turnover total_cost cost value cash bench` —— **基准列叫 `bench` 而不是 `benchmark`**；`portfolio["1day"][1]` 是**按日期索引的 dict**（不是 list），统计持仓数必须取 `.values()`。20 个交易日回测耗时约 60 秒。
 - **信号 MultiIndex 的 `datetime` 层必须是 `pd.Timestamp`**：传字符串层会在 `TopkDropoutStrategy`/回测内部报 `TypeError: Level type mismatch: 2025-12-31 00:00:00`。`DatasetH` 产出的索引本来就是 Timestamp，所以这个坑只在自行构造信号时出现。
+- **`LGBModel` 默认不可复现（实测）**：qlib 的 baseline 参数开了 `subsample=0.8789` 与 `colsample_bytree=0.8879`（逐树行/列抽样）却没有 `seed`。同一份库同一套参数，两次运行 `best_iteration` 分别是 **2 和 52**，test 段累计收益随之漂移 **20.7 个百分点**。**任何调用 `LGBModel` 的地方都必须显式 `seed=<int>` 且 `deterministic=True`**（后者强制 row-wise 划分，否则多线程仍抖）。`conftest.trained_model` 已按此设置（`seed=66`）。
+- **`TopkDropoutStrategy` 允许持仓超过 `topk`（实测）**：最大持仓 **33 = topk(30) + n_drop(3)**。它每天最多卖 `n_drop` 只、再把仓位补到 `topk`，遇到停牌/跌停卖不掉时持仓会短暂超限。判据应写成 `<= topk + n_drop`，`<= topk` 是拿直觉当标准、必失败。
+- **报告列的单位不对称（实测，`qlib/backtest/report.py:209-210`）**：`cost` 是**当日费率**，`total_cost` 是**累计金额**，二者不是累加关系（`total_cost[-1] == sum(cost)` 差出账户量级 ≈3.33e6）；而 `total_turnover[-1] == sum(turnover)` 成立（换手按率累计）。写自洽检查前必须先确认单位。
+- **`SEGMENTS` 的端点是日历日而非交易日**：`2026-01-01` 是元旦休市，回测报表首日实测为 `2026-01-05`。任何"覆盖整段"的判据必须对齐 `D.calendar(start,end)` 的首末交易日，并另加 `len(report) == 区间交易日数` 防止靠缩窗口变便宜。
+- **与源库比对日历必须带上界**：主系统每天收盘后继续写入新交易日（实测次日多出 `2026-10-15`）。若 `src` 只有下界，`cal == src` 会在建库之后每天失败。正确不变量是"以库自身最后一天为界，一天不缺、一天不许多"。
 - Alpha158 的标签是 `Ref($close, -2)/Ref($close, -1) - 1`，**设计上就前看两天**。看到"用了未来数据"不要当 bug 修掉，它是预测目标本身。
 
 ## 文件结构
@@ -1568,6 +1573,7 @@ def main() -> int:
     model = LGBModel(
         loss="mse", colsample_bytree=0.8879, learning_rate=0.2, subsample=0.8789,
         lambda_l1=205.6999, lambda_l2=580.9768, max_depth=8, num_leaves=210, num_threads=8,
+        seed=66, deterministic=True,
     )
     model.fit(dataset)
 
