@@ -30,6 +30,8 @@
 - **mlflow 集成缺口（实测崩溃，非推测）**：mlflow 3.x 把**文件系统 tracking 后端置为维护模式并直接抛 `MlflowException`**，而 qlib 0.9.7 默认走文件后端。任何调用 `model.fit()` 的入口（Task 8 测试、**Task 10 研究脚本**）都必须同时满足：① 环境变量 `MLFLOW_ALLOW_FILE_STORE=true`；② 通过 **qlib 自己的 `R.set_uri(<本地路径>)`** 指定目录 —— 不能用 `mlflow.set_tracking_uri()`，因为 `qlib/workflow/recorder.py:337` 起 recorder 时会用 ExpManager 的 default_uri 覆写回去。
 - **`LGBModel.predict(dataset, segment=...)` 返回 Series**，对它做 `.iloc[:, 0]` 会抛 `IndexError: Too many indexers`（实测）。共享 `predictions` fixture 以 DataFrame（列名 `score`）交付。
 - **`Booster.num_trees()` 在 qlib+lightgbm 这条路径上会误导**：实测它返回 2，而 evals 曲线证明 20 轮全部训练完成。判断"早停是否起作用"要看 `best_iteration` 与逐轮 valid 曲线，不能看 `num_trees()`。
+- **回测 API 实测形态（合成信号预飞行得出，2026-10-16）**：`backtest(...)` 返回 `(portfolio, indicator)`，二者都以 `"1day"` 为键；`portfolio["1day"][0]` 是报告 DataFrame，列名实测为 `account return total_turnover turnover total_cost cost value cash bench` —— **基准列叫 `bench` 而不是 `benchmark`**；`portfolio["1day"][1]` 是**按日期索引的 dict**（不是 list），统计持仓数必须取 `.values()`。20 个交易日回测耗时约 60 秒。
+- **信号 MultiIndex 的 `datetime` 层必须是 `pd.Timestamp`**：传字符串层会在 `TopkDropoutStrategy`/回测内部报 `TypeError: Level type mismatch: 2025-12-31 00:00:00`。`DatasetH` 产出的索引本来就是 Timestamp，所以这个坑只在自行构造信号时出现。
 - Alpha158 的标签是 `Ref($close, -2)/Ref($close, -1) - 1`，**设计上就前看两天**。看到"用了未来数据"不要当 bug 修掉，它是预测目标本身。
 
 ## 文件结构
@@ -1426,17 +1428,23 @@ def test_report_frame_has_return_and_risk_columns(backtest_result):
     assert portfolio, "empty portfolio metrics"
     key = next(iter(portfolio))
     report = portfolio[key][0]
-    for col in ["return", "benchmark", "cost"]:
-        assert col in report.columns, f"missing {col}"
+    # 实测列名：account return total_turnover turnover total_cost cost value cash bench
+    # 注意基准列叫 `bench`，**不是 `benchmark`**（写错会 KeyError）
+    for col in ["return", "bench", "cost", "turnover"]:
+        assert col in report.columns, f"missing {col}: {list(report.columns)}"
 
 
 def test_positions_never_exceed_topk(backtest_result):
-    _portfolio, indicator = backtest_result
-    key = next(iter(indicator))
-    positions = indicator[key][1]
-    counts = [len(p) for p in positions if len(p)]
-    assert counts, "no positions recorded"
-    assert max(counts) <= TOPK, f"held {max(counts)} names, topk is {TOPK}"
+    _portfolio, _indicator = backtest_result
+    key = next(iter(_portfolio))
+    positions = _portfolio[key][1]
+    # 实测 positions 是 **按日期索引的 dict**（date -> Position），不是 list。
+    # 直接迭代 dict 得到的是日期字符串、len 恒为 10，会让断言永远成立 —— 必须取 .values()。
+    held = [len(p) for p in positions.values() if hasattr(p, "__len__")]
+    assert held, "no positions recorded"
+    assert max(held) <= TOPK, f"held {max(held)} names, topk is {TOPK}"
+    # 假日判据自检：若每天持仓数都恰好等于 len(日期字符串)，说明又踩了迭代 dict 的坑
+    assert set(held) != {10}, "positions look like date strings, not portfolios"
 
 
 def test_turnover_and_cost_are_in_a_sane_range(backtest_result):
@@ -1453,7 +1461,7 @@ def test_returns_are_not_identical_to_the_benchmark(backtest_result):
     portfolio, _ = backtest_result
     key = next(iter(portfolio))
     report = portfolio[key][0]
-    diff = (report["return"].fillna(0.0) - report["benchmark"].fillna(0.0)).abs()
+    diff = (report["return"].fillna(0.0) - report["bench"].fillna(0.0)).abs()
     assert float(diff.max()) > 1e-6, "strategy return == benchmark return everywhere: no real trading"
 ```
 
@@ -1590,7 +1598,7 @@ def main() -> int:
     report = portfolio[next(iter(portfolio))][0]
     report.to_csv(ARTIFACTS / "backtest_report.csv")
 
-    excess = report["return"].fillna(0) - report["benchmark"].fillna(0)
+    excess = report["return"].fillna(0) - report["bench"].fillna(0)
     nav = (1 + report["return"].fillna(0)).cumprod()
     metrics.update(
         annual_return=float(nav.iloc[-1] ** (252 / len(nav)) - 1),
