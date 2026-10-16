@@ -817,13 +817,35 @@ def test_benchmark_loads(db):
     from qlib.data import D
 
     df = D.features([BENCHMARK], ["$close"], start_time=HISTORY_START, end_time=SEGMENTS["test"][1])
-    assert not df.empty and df["$close"].notna().sum() > 2000
+    # 实测：pyqlib 0.9.7 与 vendor 上游的 D.calendar 签名都是 (start_time, end_time, freq, future)，
+    # 没有 top_symbol 参数（传了会 TypeError）。旧 top_symbol 的语义 = 用该标的在 instruments
+    # 文件里的起止去切全局日历，按同义实现，且取的仍是 Qlib 自己认为的起止：
+    window_days = len(D.calendar(start_time=HISTORY_START, end_time=SEGMENTS["test"][1]))
+    # 原计划的 `> 2000` 在收窄导出窗口后物理上不可能成立（上限只有 524 天），
+    # 改为要求窗口内交易日 100% 覆盖 —— 比原断言严格得多
+    covered = int(df["$close"].notna().sum())
+    assert covered == window_days, f"benchmark covers {covered}/{window_days} in-window days"
 
 
-def D_calendar(top_symbol: str):
+@lru_cache(maxsize=1)
+def _qlib_spans() -> dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]:
+    """标的名 -> instruments 里的 (start, end) 覆盖区间，经 D.list_instruments 读出，不自己解析
+    文件 —— 这里要的就是「Qlib 自己认为这个标的哪些天该有数据」。
+    **注意**：`market="all"` 只用于按标的查区间，绝不可当可交易 universe 复制使用（三个池绝不合并）。
+    缓存是必需的：D_calendar 会被调用 600+ 次，每次重建 698 项字典要 5 秒以上。"""
     from qlib.data import D
 
-    return D.calendar(top_symbol=top_symbol)
+    return {
+        code: tuple(spans)
+        for code, spans in D.list_instruments(D.instruments(market="all"), as_list=False).items()
+    }
+
+
+def D_calendar(top_symbol: str) -> list[pd.Timestamp]:
+    from qlib.data import D
+
+    spans = _qlib_spans()[top_symbol]
+    return [d for d in D.calendar() if any(s <= d <= e for s, e in spans)]
 
 
 def _pick_samples(pool_members) -> list[tuple[str, str]]:
@@ -874,7 +896,7 @@ def test_gapped_symbol_alignment(db, pool_members):
 
     candidates = []
     for code in pool_members("cn_stocks"):
-        span = D.calendar(top_symbol=code)
+        span = D_calendar(code)
         if len(span) < 100:
             continue
         n_src = db.execute(
