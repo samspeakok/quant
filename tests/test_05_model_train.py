@@ -529,8 +529,15 @@ def test_only_the_tail_330_instruments_are_tradable_at_the_end_of_the_test_segme
     )
 
 
-def test_zz_falsification_of_every_new_guard(training_evals, dataset, predictions, monkeypatch):  # TEMPORARY
-    """可证伪性证明：把变异喂进**真实断言的输入**，每条都必须当场红，且红的必须是预期那条。"""
+def test_zz_falsification_of_every_new_guard(training_evals, dataset, predictions, monkeypatch):
+    """可证伪性证明：把变异喂进**真实断言的输入**，每条都必须当场红，且红的必须是预期那条。
+
+    这条不是临时脚手架，是随附判据的一部分，名字里的 zz 只表示"排在最后跑"。
+    维护代价是设计好的：它把预期失败信息逐字钉住，所以任何**正当**的重新基线（换库、换模型配置）
+    都必须同时改这里的 needle —— 于是"为了让测试闭嘴而改常量"这个动作会被迫把 33 条判据
+    全部重新看一遍。红的若不是预期那条，`expect` 会直接说"是红了，但红的不是预期那条"，
+    这正是它抓住过的两类真问题（针尖文本随基线过期、变异喂不进判据从而变成死判据）。
+    """
     import sys
     from contextlib import contextmanager
 
