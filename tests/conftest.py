@@ -133,6 +133,17 @@ def _use_temporary_mlflow_store(path: Path) -> None:
     R.set_uri(str(path))
 
 
+# `LGBModel.fit(..., evals_result=...)` 把这个字典交给 lightgbm 的 `record_evaluation` 回调
+# （`qlib/contrib/model/gbdt.py:76`），训练结束后就是
+# `{"train": {"l2": [每轮值...]}, "valid": {"l2": [每轮值...]}}`。
+# 它是本层唯一可信的"训练到底跑了多少轮、每轮的 loss 是多少"证据：
+# `Booster.num_trees()` 实测在这个场景里**不可信**（controller 的干净探针里 20 轮全部执行完，
+# 它仍返回 2），所以 Task 8 的机械断言全部改吃这里的曲线 + `best_iteration`。
+# 走模块级字典 + session fixture 暴露，是为了整个 session 只 fit 一次（再 fit 一次要多花几分钟，
+# 且第二份曲线会和第一份互相覆盖 —— 回调是在同一对象上累加的）。
+TRAINING_EVALS: dict = {}
+
+
 @pytest.fixture(scope="session")
 def trained_model(dataset, tmp_path_factory):
     """Task 8 产出、Task 9 复用的 LightGBM 模型；简报参数表 = qlib baseline YAML 里的那套。
@@ -143,7 +154,17 @@ def trained_model(dataset, tmp_path_factory):
     进 LightGBM 的是 38260 行），而 158 列**特征仍是原始、未归一化、含 NaN** 的那一帧
     （实测 95206 个 NaN 单元格，VWAP0 整列仍全 NaN），由 LightGBM 自己原生吸收缺失值。
     早停的验证集是 **valid**（`_prepare_data` 把 train/valid 都塞进 valid_sets），所以 valid
-    的数字天然偏乐观，样本外只能看 test。实测早停停在第 2 轮 -> 模型只有 2 棵树。
+    的数字天然偏乐观，样本外只能看 test。
+
+    交付形态 —— Task 8/9 直接继承，不要靠猜：**定种子后**实测 `best_iteration == 1`，
+    曲线共 51 轮 = 1 + early_stopping_rounds 50，而这是**真最优，不是早停假象**。
+    controller 在定种子之前用 `early_stopping_rounds=1000 > num_boost_round=20`（早停不可能触发、
+    20 轮全跑完）量到的形状是"谷底在第 2 轮后一路上升"；定种子的 session 里谷底就在第 1 轮，
+    valid l2 从 0.99683246 升到末轮 1.00050671（越过零信息基线 1.0），train l2 非递增
+    0.99387966 -> 0.97408369 —— 多 boost 只会加深过拟合，这一点两个基线一致。
+    曲线本身经 `evals_result=TRAINING_EVALS` 交给 `training_evals` fixture，
+    `tests/test_05_model_train.py` 用 `argmin` 与首尾值把这件事钉成断言。
+    不要用 `Booster.num_trees()` 做判据（它区分不了"训了 1 轮"和"训了 51 轮"）。
     """
     from qlib.contrib.model.gbdt import LGBModel
 
@@ -158,8 +179,15 @@ def trained_model(dataset, tmp_path_factory):
         max_depth=8,
         num_leaves=210,
         num_threads=8,
+        # qlib 的 baseline 配置没有固定种子，而 subsample/colsample 都 < 1（逐树行列表抽样）。
+        # 实测后果：同一份库、同一套参数，`best_iteration` 在两次运行里分别是 2 和 52，
+        # 下游 test 段的累计收益随之漂移 20.7 个百分点。也就是说 qlib 示例配置**默认不可复现**。
+        # 这里补上 seed + deterministic（deterministic 会强制 row-wise 数据划分，
+        # 否则多线程下仍有非确定性），把这条作为工程要求；该缺口已记入 README 的集成坑清单。
+        seed=66,
+        deterministic=True,
     )
-    model.fit(dataset)
+    model.fit(dataset, evals_result=TRAINING_EVALS)
     # fit 通过 R.log_metrics 留下了一个活跃实验/运行；`qlib/workflow/utils.py:28` 注册了
     # `atexit.register(R.end_exp, ...)`，于是 qlib 会在**解释器退出时**（pytest 早已关掉输出捕获）
     # 再写一条 timer 日志，表现为 session 结束后一串 "--- Logging error --- ValueError:
@@ -173,20 +201,46 @@ def trained_model(dataset, tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def predictions(trained_model, dataset):
-    """Task 8 交付给 Task 9 的打分帧：`{段名: pd.Series}`，段为 valid / test。
+def training_evals(trained_model):
+    """那一次 fit 的每轮 train/valid l2 曲线：`{"train": {"l2": [...]}, "valid": {"l2": [...]}}`。
 
-    **真实返回类型是 pd.Series，不是 DataFrame**：`qlib/contrib/model/gbdt.py:92-96`
-    `predict(self, dataset: DatasetH, segment: Union[Text, slice] = "test")` 里面是
-    `pd.Series(self.model.predict(x_test.values), index=x_test.index)`，没有列名。
-    所以简报里那行 `predictions[seg].iloc[:, 0]` 会当场 IndexError，Task 9 应直接
-    `signal=predictions["test"]`（qlib 自己接受 Series 信号：`qlib/backtest/signal.py:102`
-    `isinstance(obj, (pd.DataFrame, pd.Series))`），要帧就 `.to_frame("score")`，别再写 `.iloc[:, 0]`。
-    本 fixture 不替它包装成 DataFrame —— 保持模型层的原生产出，索引是 `['datetime','instrument']`。
-
-    Task 9 必须知道的实测形态：2 棵树的模型在 27388 / 90008 行上只给出 **30 个不同的分值**
-    （值域 -0.0243..0.0727，因为训练目标是按日横截面标准化过的标签，分数就在 z 分尺度上）。
-    TopkDropoutStrategy(topk=30) 因此是在**大量并列**里挑标的，选中谁很大程度上取决于
-    qlib 的排序稳定性，而不是模型意见 —— 回测结论要把这件事写清楚。
+    依赖 `trained_model` 只为了顺序（fit 必须已经跑完），不重新训练。
+    本层的结论"这一层没有可学的横截面信号"就是靠这条曲线证明的：定种子实测 valid 最低点在第 1 轮，
+    之后没有一轮比它更优并逐轮抬高越过 1.0（比"预测常数 0"还差；相邻轮之间有相等的平台，
+    所以不是逐轮严格上升），而 train 一路不升 —— 教科书式过拟合形状，不是早停把模型掐早了。
+    判据见 `tests/test_05_model_train.py`。
     """
-    return {seg: trained_model.predict(dataset, segment=seg) for seg in ("valid", "test")}
+    return TRAINING_EVALS
+
+
+@pytest.fixture(scope="session")
+def predictions(trained_model, dataset):
+    """Task 8 交付给 Task 9/10 的打分帧：`{段名: pd.DataFrame}`，段为 valid / test。
+
+    **精确形状（Task 9/10 按 this 写，别再猜）**：
+    - 每段一个 `pandas.DataFrame`，**单列，列名固定 `"score"`**；
+    - 索引 = 该段 `dataset.prepare(seg, col_set="feature")` 的索引，逐行相同，
+      `MultiIndex` 层级名 `["datetime", "instrument"]`；
+    - 行数 valid 27388 / test 90008，无 NaN、无 inf；
+    - 两种下游写法都成立：`predictions["test"].iloc[:, 0]`（→ Series）与
+      `.to_frame("score")` 前的 `predictions["test"]` 本身（→ 已是 DataFrame）。
+      `LGBModel.predict` 的原生返回其实是 **Series**（`gbdt.py:92-96`
+      `pd.Series(self.model.predict(x_test.values), index=x_test.index)`，没有列名），
+      本 fixture 只在外面套一层 `.to_frame("score")`，不排序、不去重、不填值、不改索引。
+      之所以要包这一层：Task 9 简报里那行 `predictions["test"].iloc[:, 0]` 作用在 Series 上会
+      当场 `IndexError: Too many indexers`（已实测复现）。
+
+    退化形态 —— 回测结论必须把它写清楚，不能当成"模型有意见"：定种子后这 1 轮模型在
+    27388 / 90008 行上只给出 **5 个不同分值**（值域 -0.010817..0.036565，std 0.010776 / 0.012261，
+    因为训练目标是按日横截面标准化过的标签，分数就在 z 分尺度上）。
+    `TopkDropoutStrategy(topk=30)` 因此几乎完全是在**并列**里挑标的：实测 test 段 181 个交易日
+    每天都恰好只有 5 档分值，第 30 名所在的那一档最多有 **249 只并列**（候选池 30..269）。
+    pooled |IC| 实测 valid -0.00127837 / test -0.00410591，两段都在各自 200 次置换零分布的
+    95 分位以内（分位 0.265 / 0.785，`beats_null_p95=False / False`），即**没有可检测的排序能力**。
+    这些数字由 `tests/test_05_model_train.py` 钉成断言：将来谁改了参数让模型真的开始学，
+    这几条会当场红，而不是被悄悄当成一个训练好的预测器继承下去。
+    """
+    return {
+        seg: trained_model.predict(dataset, segment=seg).to_frame("score")
+        for seg in ("valid", "test")
+    }
