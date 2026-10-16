@@ -33,6 +33,7 @@ docs/superpowers/      设计文档与 11 任务计划（含全部实测坑）
 ## 怎么跑
 
 ```bash
+./.venv/Scripts/python.exe tools/smoke_test.py                  # 先证安装：导入 + Cython 扩展 + 装配点
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt   # 见下方"依赖"
 ./.venv/Scripts/python.exe tools/export_bars.py                 # 只读导出 → tools/_export/csv/
 ./.venv/Scripts/python.exe tools/build_qlib_data.py             # 建库 → qlib_data/
