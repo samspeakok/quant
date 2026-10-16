@@ -28,6 +28,25 @@ EXPECTED_ALPHA158_PROCESSORS = ["DropnaLabel", "CSZScoreNorm"]
 DELIVERED_NAN_CELLS = 306421
 DELIVERED_NAN_CELLS_LIVE_COLUMNS = 147213
 
+# 规格原文里逐字抄下来的标签表达式（docs/superpowers/plans/2026-10-15-qlib-capability-verification.md:33
+# 与 .superpowers/sdd/.../task-10-brief.md:129 同一条）。A2 的关键：断言的对象必须是**规格字面量**，
+# 不能是 handler 自己吐出来的 exprs —— 拿 exprs[0] 和 exprs[0] 比，把标签改成 Ref($close,-1) 也照样绿。
+SPEC_LABEL_EXPR = "Ref($close, -2)/Ref($close, -1) - 1"
+
+
+def _strip_ws(expr: str) -> str:
+    """只剥空白，不做别的规范化：`Ref($close,-2)/Ref($close,-1)-1` 与规格写法视为同一条表达式。"""
+    return re.sub(r"\s+", "", expr)
+
+
+def _assert_label_expression_is_the_spec_one(exprs: list[str]) -> None:
+    """把标签钉在规格字面量上（逐条、按位置，列数也必须还是 1 条）。"""
+    assert [_strip_ws(e) for e in exprs] == [_strip_ws(SPEC_LABEL_EXPR)], (
+        f"标签表达式不是规格里那条 {SPEC_LABEL_EXPR!r}，实际是 {exprs}。"
+        "换成前看一天（`Ref($close,-1)/$close - 1` 之类）改的是预测目标本身：Task 6 的跨层数值比对、"
+        "Task 8 的训练标签、Task 9 的留出尾部口径会一起失去意义。"
+    )
+
 
 def _store_fields(instruments: list[str]) -> set[str]:
     """原始字段清单：库里的 .day.bin 文件名就是 Qlib 能读到的 $field。
@@ -128,6 +147,7 @@ def test_label_uses_the_declared_two_day_forward_return(alpha158_handler):
     assert "Ref($close, -2)" in exprs[0] and "Ref($close, -1)" in exprs[0], (
         f"标签不再是前看两天的收益：{exprs[0]}"
     )
+    _assert_label_expression_is_the_spec_one(list(exprs))
     # 数值侧：矩阵里那一列必须等于数据层同一表达式的读数（该表达式的算术已在 Task 5 逐点比对过）
     got = label.iloc[:, 0].dropna()
     inst = got.index.get_level_values("instrument")[0]
@@ -136,6 +156,27 @@ def test_label_uses_the_declared_two_day_forward_return(alpha158_handler):
     assert len(want) == 1, f"{inst} {day}: 数据层标签读数应该有 1 行，实际 {len(want)}"
     ref, val = float(want.iloc[0]), float(got.iloc[0])
     assert abs(ref - val) <= 1e-6 * abs(ref) + 1e-9, f"{inst} {day}: 矩阵标签 {val} vs 数据层 {ref}"
+
+
+def test_the_spec_literal_guard_rejects_the_one_day_label_forms():
+    """A2 的可证伪性自证：同一条守卫作用在"前看一天"那几个写法上必须报错。
+
+    不读数据，纯字符串，毫秒级。它证明这条断言不是拿 handler 的话复读一遍：
+    handler 只要给出下面任何一条，`test_label_uses_the_declared_two_day_forward_return` 就会红。
+    """
+    one_day_forms = [
+        "Ref($close, -1)/$close - 1",
+        "Ref($close,-1)/$close-1",
+        "Ref($close, -1)/Ref($close, 0) - 1",
+    ]
+    for wrong in one_day_forms:
+        with pytest.raises(AssertionError, match="标签表达式不是规格里那条"):
+            _assert_label_expression_is_the_spec_one([wrong])
+    # 条数也必须钉住：多塞一条标签（哪怕第一条还对）同样不许过。
+    with pytest.raises(AssertionError, match="标签表达式不是规格里那条"):
+        _assert_label_expression_is_the_spec_one([SPEC_LABEL_EXPR, "Ref($close, -3)/Ref($close, -1) - 1"])
+    # 空白差异不该误报：这是本条守卫唯一允许的写法自由度。
+    _assert_label_expression_is_the_spec_one(["Ref($close,-2)/Ref($close,-1)-1"])
 
 
 def _assert_fit_windows_are_train_bounded(processors) -> int:

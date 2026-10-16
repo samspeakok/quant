@@ -112,6 +112,50 @@ def _from_qlib_code(qlib_code: str) -> str:
     return f"{qlib_code[2:]}.{qlib_code[:2]}"
 
 
+def _pool_members(path: Path) -> list[str]:
+    """读回真正落到磁盘上的池文件 —— 闸门验的是交付物，不是内存里那张表。"""
+    return [ln.split(INSTRUMENTS_SEP)[0] for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def assert_pools_account_for_all(qlib_dir: Path, n_all: int) -> None:
+    """三池必须**不重不漏**地覆盖 all.txt，否则当场 fail-closed。
+
+    为什么这条是承重的：`write_pools` 只按 `classify_symbol` 的结果分池，分类器一旦被改窄（新的代码段
+    没补进 `_SH_STOCK` / `_SZ_ETF` 之类），那个标的就掉进未分类分支、从三个池里同时消失 —— 池子静默
+    缩小，而 Task 10 的研究 universe 正是 `cn_stocks`。唯一防线
+    `tests/test_build_qlib_data.py::test_three_pool_files_exist_with_expected_sizes` 在 `qlib_data/`
+    不存在时是 SKIP，恰好在最该拦住它的场景里失效。所以锚点必须写在**产池的那一步**里。
+
+    重复同样致命：`POOLS` 里两个池映射到同一个 asset 时，同一个标的会出现在两份名单里，下游按池拼接
+    的 universe 会把它算两遍。
+
+    锚取 `n_all`（all.txt 读到的标的数），它与 `verify_store` 用的 CSV 张数是同一条链上的两个量：
+    闸门先把 all.txt 钉在导出规模上，这里再把池钉在 all.txt 上。
+    """
+    members = {pool: _pool_members(qlib_dir / "instruments" / f"{pool}.txt") for pool in POOLS}
+    observed = sum(len(ms) for ms in members.values())
+
+    pools_of: dict[str, list[str]] = {}
+    for pool, ms in members.items():
+        for symbol in ms:
+            pools_of.setdefault(symbol, []).append(pool)
+    shared = {symbol: sorted(ps) for symbol, ps in pools_of.items() if len(ps) > 1}
+    if shared:
+        raise RuntimeError(
+            f"instrument pools overlap: {shared} appear in more than one of {sorted(POOLS)}; "
+            f"pools hold {observed} members in total but {qlib_dir / 'instruments' / 'all.txt'} "
+            f"lists {n_all} instruments; each instrument must land in exactly one pool"
+        )
+
+    if observed != n_all:
+        dropped = sorted(set(_pool_members(qlib_dir / "instruments" / "all.txt")) - set(pools_of))
+        raise RuntimeError(
+            f"pools hold {observed} members in total but {qlib_dir / 'instruments' / 'all.txt'} lists "
+            f"{n_all} instruments (per-pool { {pool: len(ms) for pool, ms in members.items()} }); "
+            f"classification is silently shrinking a pool — unaccounted: {dropped[:10]}"
+        )
+
+
 def write_pools(qlib_dir: Path) -> dict[str, int]:
     all_path = qlib_dir / "instruments" / "all.txt"
     rows = []
@@ -139,6 +183,8 @@ def write_pools(qlib_dir: Path) -> dict[str, int]:
     unmapped = df[df["asset"].isna()]
     if len(unmapped):
         print(f"[warn] {len(unmapped)} instruments unclassified and excluded from all pools")
+    # 写完之后立刻回锚：未分类的标的（上面那条 warn）在这里变成硬失败，不许以警告的形式咽下去。
+    assert_pools_account_for_all(qlib_dir, len(df))
     return counts
 
 
