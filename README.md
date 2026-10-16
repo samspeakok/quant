@@ -141,7 +141,12 @@ docs/superpowers/      设计文档与 11 任务计划（含全部实测坑）
    `tests/` 侧因为把跟踪目录放在 pytest 临时目录而一直没暴露这个差异，
    `research/` 第一次按"产物都放 artifacts/"的直觉写就撞上了 —— 现在跟踪目录也走临时目录，
    `artifacts/` 里只留有研究意义的文件。
-10. **`atexit` 钩子会在解释器退出时往已关闭的 stdout 写日志**，表现为一串
+10. **handler 的时间窗必须覆盖所有 segment，否则 qlib 一声不响地给你空帧。**
+    `Alpha158(end_time=SEGMENTS["valid"][1])` 配 `DatasetH(segments=含 test)`：test 段
+    `prepare` 出来是 0 行、`predict` 也是 0 行，回测照样"成功"跑完并交出一条没有交易的空曲线。
+    本轮计划原文就带的这个 bug，直到研究脚本对空数组取 `min()` 才炸出来。
+    现在 `research/` 里紧跟一条 fail-closed：任何一段 prepared 行数为 0 立刻退出并说明原因。
+11. **`atexit` 钩子会在解释器退出时往已关闭的 stdout 写日志**，表现为一串
    `--- Logging error --- ValueError: I/O operation on closed file`。在 fixture 内当场
    `R.end_exp(...)` 收尾即可（qlib 自己的注释说实验结束后钩子不再生效）。
 

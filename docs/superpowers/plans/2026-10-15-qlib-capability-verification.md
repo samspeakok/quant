@@ -1134,7 +1134,10 @@ def alpha158_handler():
     return Alpha158(
         instruments="cn_stocks",
         start_time=HISTORY_START,
-        end_time=SEGMENTS["valid"][1],
+        # 计划原文这里是 `SEGMENTS["valid"][1]` —— **计划的 bug**：handler 只铺到 valid 末，
+        # test 段一行数据都没有，prepare/predict 全空，回测会"成功地"跑出一条空曲线冒充结果。
+        # 2026-10-16 由 research/ 首次实跑炸出（零长数组取 min）。与 tests/conftest 统一到 test 末。
+        end_time=SEGMENTS["test"][1],
         fit_start_time=HISTORY_START,
         fit_end_time=SEGMENTS["train"][1],
     )
@@ -1579,7 +1582,10 @@ def main() -> int:
     handler = Alpha158(
         instruments="cn_stocks",
         start_time=HISTORY_START,
-        end_time=SEGMENTS["valid"][1],
+        # 计划原文这里是 `SEGMENTS["valid"][1]` —— **计划的 bug**：handler 只铺到 valid 末，
+        # test 段一行数据都没有，prepare/predict 全空，回测会"成功地"跑出一条空曲线冒充结果。
+        # 2026-10-16 由 research/ 首次实跑炸出（零长数组取 min）。与 tests/conftest 统一到 test 末。
+        end_time=SEGMENTS["test"][1],
         fit_start_time=HISTORY_START,
         fit_end_time=SEGMENTS["train"][1],
     )
