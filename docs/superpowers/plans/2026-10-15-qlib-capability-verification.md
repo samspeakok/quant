@@ -1676,9 +1676,7 @@ git add research/__init__.py research/alpha158_lgbm_backtest.py
 
 - [ ] **Step 1: 写 `README.md`**
 
-结构固定如下，每节填入实际数字，不留空句：
-
-1. **一句话**：本工程用本机 36 万行真实 A 股日线验证 Qlib 六层闭环。
+结构固定如下，每节填入实际数字，不留空句：1. **一句话**：本工程用本机 36 万行真实 A 股日线验证 Qlib 六层闭环。
 2. **环境事实表**：Python 3.12.10 / pyqlib 0.9.7 / numpy 2.5.4 / pandas 3.0.6 / 官方 `cp312-win_amd64` wheel，Windows 原生无需 WSL。
 3. **Qlib 功能地图**：按 `.py` 文件数列出 `contrib 102 / rl 38 / data 20 / model 18 / workflow 16 / backtest 12 / utils 11 / cli 3 / strategy 2`，每项标注本轮验证状态（已实跑 / 仅导入 / 未覆盖），未覆盖的显式写明原因。
 4. **三步上手**：建数据、跑测试、跑研究的确切命令。
@@ -1686,6 +1684,16 @@ git add research/__init__.py research/alpha158_lgbm_backtest.py
 6. **两个坑**：`asset_type` 标签自相矛盾（`000001.SH`/`000905.SH`）；非 CN 市场数据会污染交易日历。
 7. **下一步消除幸存者偏差**：注明 hs300 成分历史时点快照的位置 `codex/量化分析/data/lake/**/source=user_file_hs300_pit_*`，以及为什么 `cn_stocks` 全池回测会高估收益（今天还在的 626 只股票，是几十年退市筛选之后的幸存者）。这条同时承接 spec §4.5 里「注释写进 cn_index.txt」那个实现不了的决定。
 8. **本轮没验证的东西**：qrun 工作流、mlflow、滚动训练、cvxpy 组合优化、PIT、强化学习 —— 明确列出，不含糊。
+
+**数字来源规则（必须遵守）**：README 里每一个数字都要能指认到**机器产出的权威源**，不许从对话或报告散文里手工摘取。权威源固定为：
+
+- 各层结论数字 → `tests/` 里被断言钉住的常量（`test_01` 的 250 对比对、`test_03` 的 158 列/`VWAP0` 死列、`test_05` 的 `best_iteration` 与 `distinct` 与 IC 上下界、`test_04` 的 660 行留出消费）
+- 模型层 IC 与零分布 → `test_05_model_train.py` 断言里的实测常量（报告 `task-8-report.md` 里有 9 个不同量级的 IC 数值，属零分布表格，**不可手工挑用**）
+- 回测与 alpha 结论 → `artifacts/metrics.json`（Task 10 产出）
+- 库与数据基数 → `qlib_data/calendars/day.txt` 行数、`instruments/*.txt` 行数、`tools/_export/csv` 文件数
+- 逐轮过拟合曲线（valid 第 2 轮见底后单调恶化）→ 直接引用 `conftest.TRAINING_EVALS` 里的数组，而不是文字描述
+
+若某数字找不到上述任一来源，就不要写进 README；改为写进"本轮未验证"清单。
 
 - [ ] **Step 2: 确认无占位表述**
 
