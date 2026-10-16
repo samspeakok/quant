@@ -19,7 +19,10 @@ _SH_STOCK = ("600", "601", "603", "605", "688", "689")
 _SH_ETF = ("51", "52", "56", "58")
 _SZ_STOCK = ("000", "001", "002", "003", "300", "301", "302")
 _SZ_ETF = ("15", "16")
-_BJ_STOCK = ("43", "83", "87", "88", "89", "92")
+# 899xxx 是北证系列指数（899001 即北证50），必须先于股票段判定，否则指数会被
+# 分进可交易池 —— 指数没有可成交价，回测会凭空抬高收益。
+_BJ_INDEX = ("899",)
+_BJ_STOCK = ("43", "83", "87", "88", "92")
 
 
 def classify_symbol(symbol: str) -> str | None:
@@ -41,6 +44,8 @@ def classify_symbol(symbol: str) -> str | None:
         if code.startswith(_SZ_ETF):
             return "etf"
     elif exch == "BJ":
+        if code.startswith(_BJ_INDEX):
+            return "index"
         if code.startswith(_BJ_STOCK):
             return "stock"
     return None

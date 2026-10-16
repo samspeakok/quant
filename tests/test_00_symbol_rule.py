@@ -21,6 +21,9 @@ from config.settings import POOLS, SEGMENTS, classify_symbol, to_qlib_code
         # 北交所
         ("832004.BJ", "stock"),
         ("430139.BJ", "stock"),
+        ("889117.BJ", "stock"),
+        # 北证系列指数：899xxx 必须是 index，不能落进可交易股票池
+        ("899001.BJ", "index"),
         # ETF：15/16 开头在深市，51/56/58 与 52 开头在上海
         ("159611.SZ", "etf"),
         ("510300.SH", "etf"),
