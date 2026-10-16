@@ -140,11 +140,24 @@ def main() -> int:
     handler = Alpha158(
         instruments="cn_stocks",
         start_time=HISTORY_START,
-        end_time=SEGMENTS["valid"][1],
+        # 计划的 Task 10 代码块这里写的是 `SEGMENTS["valid"][1]` —— 那是**计划里的 bug**，
+        # 实测后果：handler 只铺到 2025-12-31，test 段一行数据都没有，prepare/predict 全空，
+        # 回测会"成功地"跑出一条没有持仓没有交易的空曲线。本文件第一次跑到取
+        # `n_cand.min()` 时因零长数组才把它炸出来。与 tests/conftest.py::ALPHA158_KWARGS
+        # 统一到 test 段末，并且下面加一条 fail-closed：任何一段 prepared 为空立刻退出。
+        end_time=SEGMENTS["test"][1],
         fit_start_time=HISTORY_START,
         fit_end_time=SEGMENTS["train"][1],
     )
     dataset = DatasetH(handler, segments=SEGMENTS)
+
+    prepared = {seg: len(dataset.prepare(seg, col_set="feature")) for seg in SEGMENTS}
+    print(f"[T10] 各段 prepared 行数 {prepared}", flush=True)
+    empty = {seg: n for seg, n in prepared.items() if n == 0}
+    assert not empty, (
+        f"这些段在 handler 的时间窗里一行数据都没有：{empty}（prepared 行数 {prepared}）—— "
+        f"区间与数据错位，继续跑只会产出一条空回测曲线冒充结果"
+    )
 
     # 库容量是结论第 4 节"数据不足以支撑业绩判断"的依据，所以这里当场数一遍，不引用记忆里的数
     pools = {
@@ -204,6 +217,10 @@ def main() -> int:
     by_day = {d: f["score"] for d, f in test_scores.groupby(level="datetime", sort=True)}
     profiles = [_tie_profile(v.to_numpy(), TOPK) for v in by_day.values()]
     defined = [p for p in profiles if p["defined"]]
+    assert defined, (
+        f"test 段 {len(profiles)} 天里没有任何一天候选数达到 topk={TOPK}，"
+        f"并列规模无从度量 —— 打分宇宙出了问题，不能把空数组的 min 当结果"
+    )
     tie_cut = np.array([p["n_at_cut"] for p in defined], dtype=float)
     tie_slots = np.array([p["slots_from_tie"] for p in defined], dtype=float)
     n_cand = np.array([v.size for v in by_day.values()], dtype=float)
@@ -358,11 +375,21 @@ def _write_findings(m: dict) -> None:
 - 不声称跑赢基准或跑赢随机：第 2 节的裁定已经否掉了"有排序能力"。
 - 未覆盖 qlib 的其余能力面（在线学习、嵌套决策、Portfolio 层其他策略、模型 zoo、
   高频/分钟线、`Recorder` 的完整实验管理、Alpha360 的实盘装配等）—— 见 README 的功能地图。
-- 数据容量本身不足以下结论：库里 A 股日线只到 2021-08-26 起、2021/2022/2023 各只有 1 只标的，
-  训练窗只有 {SEGMENTS['train'][0]} 起的一段，且 universe 仅 330 只（test 段末只剩 {tie['candidates_min']} 只有价）。
-  **本轮判据是"能否跑通"，收益好不好是后面的事，且必须先解决数据容量。**
+- 数据容量本身不足以下结论：库里的 A 股日线**从 2021-08-26 才开始有**，
+  2021/2022/2023 各只有 1 只标的，训练窗只能落在 {SEGMENTS['train'][0]} 起的一段；
+  可交易池 `cn_stocks` 共 {tie['candidates_max']} 只，而 test 段末两个交易日只剩
+  {tie['candidates_min']} 只有价。**本轮判据是"能否跑通"，收益好不好是后面的事，
+  且必须先解决数据容量（加历史深度、加标的数），不是调模型。**
 
-## 5. 解释性注意事项
+## 5. 这些数字与 tests/ 的关系（独立复算，不是抄常量）
+
+本文每个数都由本脚本**自己算出来**：独立进程、不同代码路径、不 import `tests/`。
+它们与 `tests/` 里钉住的常量逐项一致（轮数、谷底、曲线首末、两段 IC、零分布 sd 与分位、
+不同分值数、并列规模、cum_return / 换手 / 成本 / 混合费率），
+唯一可见的差异是 `cum_return` 在第 15 位小数上不同（求和顺序级别），
+远小于测试带宽 2e-4 —— 也就是说这条曲线是被**两边各自量出来**的，不是抄出来的。
+
+## 6. 解释性注意事项
 
 - 标签是 `Ref($close,-2)/Ref($close,-1)-1`，按设计是两日前向收益（不是次日）。
 - 成本是配置的 5bp 开 / 15bp 平 + 最小 5 元；**未建模滑点**。
