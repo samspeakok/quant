@@ -49,25 +49,62 @@ def run_dump() -> None:
         raise RuntimeError(f"dump_bin.py exited with {proc.returncode}; store is not trustworthy")
 
 
-def verify_store() -> None:
-    """dump_bin 的失败可能只落在日志里；写池之前先证实库真的建起来了。"""
-    cal_path = QLIB_DIR / "calendars" / f"{FREQ}.txt"
-    all_path = QLIB_DIR / "instruments" / "all.txt"
+def verify_store(qlib_dir: Path = QLIB_DIR, csv_dir: Path = EXPORT_CSV_DIR) -> None:
+    """dump_bin 的失败可能只落在日志里；写池之前先绝对地证实库真的建起来了。
+
+    为什么不能只比较 n_feat 与 n_all：两者都由同一次 dump 产出，相等只说明"这次 dump 自洽"，
+    不说明"该有的标的都在"。`--limit_nums=3` 重跑一遍就会得到 3 == 3 的平凡通过，随后
+    write_pools 写出 3 成员的池、main() 返回 0 —— 闸门形同虚设。
+
+    锚点取闸门自身不产出的东西：tools/export_bars.py 保证一个标的一张 CSV（写之前清空
+    陈旧 *.csv，写完断言 written == symbols），所以 instruments/all.txt 的行数必须等于
+    导出目录里的 CSV 张数。features/ 还要逐个目录核对 close.{FREQ}.bin，并把 all.txt 的
+    标的名与实到目录名做集合比对 —— 纯计数相等也可能被"缺一个又多一个"蒙过去。
+    """
+    cal_path = qlib_dir / "calendars" / f"{FREQ}.txt"
+    all_path = qlib_dir / "instruments" / "all.txt"
+    feats_dir = qlib_dir / "features"
+    close_bin = f"close.{FREQ}.bin"
+
     n_cal = len(cal_path.read_text(encoding="utf-8").split()) if cal_path.exists() else 0
     if n_cal == 0:
         raise RuntimeError(f"{cal_path} missing or empty; feature dump failed")
-    n_all = len([ln for ln in all_path.read_text(encoding="utf-8").splitlines() if ln.strip()])
-    close_bin = f"close.{FREQ}.bin"
-    n_feat = sum(
-        1
-        for d in (QLIB_DIR / "features").iterdir()
-        if d.is_dir() and (d / close_bin).exists()
-    )
-    print(f"store: {n_cal} calendar days, {n_all} instruments in all.txt, {n_feat} dirs with {close_bin}")
-    if n_feat != n_all:
+    if not all_path.exists():
+        raise RuntimeError(f"{all_path} missing; instruments dump failed")
+
+    codes = [ln.split(INSTRUMENTS_SEP)[0] for ln in all_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    n_all = len(codes)
+
+    n_csv = len(list(csv_dir.glob("*.csv"))) if csv_dir.exists() else 0
+    if n_csv == 0:
         raise RuntimeError(
-            f"features/ holds {n_feat} complete instruments but all.txt lists {n_all}; dump incomplete"
+            f"{csv_dir} holds 0 CSVs, so nothing anchors {n_all} instruments in {all_path}; "
+            "run tools/export_bars.py first"
         )
+    if n_all != n_csv:
+        raise RuntimeError(
+            f"{all_path} lists {n_all} instruments but {csv_dir} holds {n_csv} CSVs; "
+            f"dump truncated or export stale — refusing to write pools over {n_all} of {n_csv} symbols"
+        )
+
+    complete = (
+        {d.name for d in feats_dir.iterdir() if d.is_dir() and (d / close_bin).exists()}
+        if feats_dir.exists()
+        else set()
+    )
+    expected = {code.lower() for code in codes}
+    missing = sorted(expected - complete)
+    unexpected = sorted(complete - expected)
+    if len(complete) != n_all or missing or unexpected:
+        raise RuntimeError(
+            f"features/ holds {len(complete)} dirs with {close_bin} but {all_path} lists {n_all} "
+            f"instruments (missing {missing}, unexpected {unexpected}); dump incomplete"
+        )
+
+    print(
+        f"store: {n_cal} calendar days, {n_all} instruments == {n_csv} CSVs, "
+        f"{len(complete)} dirs with {close_bin}"
+    )
 
 
 def _from_qlib_code(qlib_code: str) -> str:
@@ -111,7 +148,7 @@ def main() -> int:
         return 1
     QLIB_DIR.mkdir(parents=True, exist_ok=True)
     run_dump()
-    verify_store()
+    verify_store(QLIB_DIR, EXPORT_CSV_DIR)
     print("pools:", write_pools(QLIB_DIR))
     return 0
 
