@@ -8,13 +8,12 @@ and this whole cross-check would silently validate itself.
 from __future__ import annotations
 
 import random
-from datetime import date as _date
 from functools import lru_cache
 
 import pandas as pd
 import pytest
 
-from config.settings import BENCHMARK, HISTORY_START, QLIB_DIR, SEGMENTS
+from config.settings import BENCHMARK, HISTORY_START, SEGMENTS
 
 pytestmark = pytest.mark.usefixtures("qlib_ready")
 
@@ -28,7 +27,18 @@ def test_calendar_contains_no_foreign_trading_days(db):
     非 CN 标的混入会带来幽灵交易日，让所有 A 股在该日全为 NaN。"""
     from qlib.data import D
 
-    cal = {d.strftime("%Y-%m-%d") for d in D.calendar()}
+    # 必须先留**有序列表**再派生 set：layer-1 判据明文要求"日历非空且严格递增"，而上一版直接
+    # 写成集合推导式，把重复日/乱序全吸收了，cal == src 照样通过。Qlib 不会替我们清理：
+    # qlib/data/data.py:675 是 `[pd.Timestamp(x) for x in backend_obj]`（不 np.unique、不 sort），
+    # :174 的索引表是 `{x: i for i, x in enumerate(...)}`（重复日静默保留最后一个下标）。
+    cal_list = list(D.calendar())
+    assert cal_list, "Qlib 日历为空：calendars/day.txt 读不出任何交易日"
+    assert cal_list == sorted(set(cal_list)), (
+        f"day.txt 必须非空、无重复日且严格递增：{len(cal_list)} 项，"
+        f"{len(cal_list) - len(set(cal_list))} 个重复，"
+        f"乱序位 {[i for i in range(1, len(cal_list)) if cal_list[i] <= cal_list[i - 1]][:5]}"
+    )
+    cal = {d.strftime("%Y-%m-%d") for d in cal_list}
     src = {
         r[0]
         for r in db.execute(
@@ -66,6 +76,8 @@ def _qlib_spans() -> dict[str, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]:
     缓存一次：D_calendar 会被调用 600+ 次，每次都重建整张 698 项字典要 5 秒以上。"""
     from qlib.data import D
 
+    # market="all" 在这里**只**用于按标的查它自己的起止区间；它绝不是可交易宇宙，
+    # 不可复制到任何选股/回测代码里（三个池 cn_stocks/cn_etf/cn_index 绝不合并）。
     return {code: tuple(spans) for code, spans in D.list_instruments(D.instruments(market="all"), as_list=False).items()}
 
 
@@ -84,34 +96,50 @@ def D_calendar(top_symbol: str) -> list[pd.Timestamp]:
     return [d for d in D.calendar() if any(s <= d <= e for s, e in spans)]
 
 
-def _pick_samples(pool_members) -> list[tuple[str, str]]:
+def _pick_samples(pool_members) -> tuple[list[tuple[str, str]], list[str]]:
     """每个池取 min(20, 池大小) —— cn_index 只有 10 个，写死 20 会让测试直接失败。
     样本在测试体内自取，不用 @pytest.mark.parametrize：parametrize 在收集阶段就要拿到
-    fixture 的值，而那时 qlib 还没 init。"""
+    fixture 的值，而那时 qlib 还没 init。
+
+    返回 (picked, thin)。thin 是「被抽中但 Qlib 自己认为它不足 10 个交易日」因而整只丢掉
+    5 个样本的成员名单：这一档丢弃过去是静默的，抽样分母会无声缩小，现在必须一并上报。"""
     random.seed(20261015)
     picked: list[tuple[str, str]] = []
+    thin: list[str] = []
     for pool in ("cn_stocks", "cn_etf", "cn_index"):
         members = pool_members(pool)
         for code in random.sample(members, min(20, len(members))):
             days = D_calendar(code)
             if len(days) < 10:
+                thin.append(f"{pool}:{code}={len(days)}d")
                 continue
             for d in [days[0], days[-1], days[len(days) // 3], days[len(days) // 2], days[-3]]:
                 picked.append((code, d.strftime("%Y-%m-%d")))
-    return picked
+    return picked, thin
 
 
 def test_close_matches_source_database(db, pool_members):
-    """核心断言：Qlib 读出的收盘价 == 源库里那一天的收盘价。"""
+    """核心断言：Qlib 读出的收盘价 == 源库里那一天的收盘价。
+
+    通过条件不是「比对到的都相等」，而是**每一个抽样对都必须走到数值比对**。
+    任何一条 skip 路径都等于本层只验了样本的一部分 —— 而那正是这层要防的失败模式，
+    所以宁可当场失败并打印原因明细，也不「跳过然后全绿」。"""
     from qlib.data import D
 
-    picked = _pick_samples(pool_members)
+    picked, thin = _pick_samples(pool_members)
     assert picked, "no samples selected"
+    assert len(picked) >= 50, f"sampling is broken: only {len(picked)} pairs picked"
+    assert not thin, f"{len(thin)} sampled instruments skipped for <10 Qlib trading days: {thin[:10]}"
 
     checked = 0
+    # 每一档 skip 都按原因计数并留下 offending 样本，供最终断言的报错原文使用。
+    skipped: dict[str, list[str]] = {"qlib_empty_frame": [], "qlib_nan_placeholder": []}
     for code, day in picked:
         got = D.features([code], ["$close"], start_time=day, end_time=day)["$close"]
         if got.empty:
+            # 这个 day 就是从该标的**自己的** Qlib 覆盖区间里取出来的，返回空表本身就是
+            # span-vs-data 错位信号（Qlib 说这天该有行却一行都没有），不能咽下去。
+            skipped["qlib_empty_frame"].append(f"{code} {day}")
             continue
         want = db.execute(
             "SELECT close FROM bars WHERE symbol=? AND frequency='1d' AND adjust='qfq' AND market='CN' "
@@ -127,13 +155,24 @@ def test_close_matches_source_database(db, pool_members):
         #   qlib=数值 ⟹  源库当天必须有一行且数值相等（原断言，容差 1e-6 未动）
         if pd.isna(qlib_v):
             assert not want, f"{code} {day}: qlib reads NaN but the source database has a bar"
+            skipped["qlib_nan_placeholder"].append(f"{code} {day}")
             continue
         assert want, f"{code} {day}: qlib has a bar but the source database has none"
-        src_v = float(want[0][0])
+        # (symbol, day) 必须唯一确定一根 bar：实测今日 0 例重复。多行意味着源库同一天有
+        # 重复 bar（或时区取日把两天并进了一天），此时 want[0] 取到哪一行是碰运气。
+        assert len(want) == 1, f"{code} {day}: source has {len(want)} bars for one (symbol, day): {want}"
+        src_close = want[0][0]
+        # 显式判定 NULL，而不是让 float(None) 抛一个和真实问题无关的 TypeError。
+        assert src_close is not None, f"{code} {day}: source close is NULL while qlib reads {float(qlib_v)}"
+        src_v = float(src_close)
         assert abs(float(qlib_v) - src_v) <= abs(src_v) * 1e-6 + 1e-9, f"{code} {day}: qlib={float(qlib_v)} source={src_v}"
         checked += 1
 
-    assert checked >= 50, f"only {checked} pairs compared; sampling is broken"
+    breakdown = "; ".join(f"{reason}={len(hits)}{hits[:5] if hits else ''}" for reason, hits in skipped.items())
+    assert checked == len(picked), (
+        f"picked={len(picked)} compared={checked} skipped={len(picked) - checked} -> {breakdown}. "
+        f"每个抽样对都必须完成数值比对；skip 不是「正常停牌」的通行证，而是本层没验完。"
+    )
 
 
 def test_gapped_symbol_alignment(db, pool_members):
@@ -155,17 +194,30 @@ def test_gapped_symbol_alignment(db, pool_members):
 
     code, n_src, _ = max(candidates, key=lambda c: c[2] - c[1])
     df = D.features([code], ["$close"], start_time=HISTORY_START, end_time=SEGMENTS["test"][1]).dropna()
+    # 两侧口径必须一致，"相等"才是可判定的比较：Qlib 侧被 start/end 夹在窗口里，源库侧原来
+    # 只有下界，于是窗口外尾部的那几天（实测 SH601995 多 2026-10-08/09/12 三天：351 vs 348）
+    # 会把上界方向变成假报警。这里补 <= SEGMENTS["test"][1] 把源库夹进同一个窗口。
     src_days = {
         r[0]
         for r in db.execute(
             "SELECT DISTINCT strftime(CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE), '%Y-%m-%d') FROM bars "
             "WHERE symbol=? AND frequency='1d' AND adjust='qfq' AND market='CN' "
-            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) >= ?",
-            [from_qlib_code(code), HISTORY_START],
+            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) >= ? "
+            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) <= CAST(? AS DATE)",
+            [from_qlib_code(code), HISTORY_START, SEGMENTS["test"][1]],
         ).fetchall()
     }
     # get_level_values 是「整个 MultiIndex」的方法，不是单行元组的方法
     qlib_days = {
         d.strftime("%Y-%m-%d") for d in df.index.get_level_values("datetime").unique()
     }
-    assert qlib_days <= src_days, f"qlib reports days absent from source: {sorted(qlib_days - src_days)[:5]}"
+    assert qlib_days, f"{code}: qlib reads zero non-NaN trading days inside the test window"
+    # 双向断言。上一版只写 `qlib_days <= src_days`，那只证明「Qlib 不凭空造日」，
+    # 证明不了「Qlib 不丢源库已有的交易日」—— 后者正是本层要抓的静默丢数据；而唯一能
+    # 抓到它的 D3 NaN 分支在本轮种子下触发 0 次，等于这条方向只有纸面守卫。
+    assert qlib_days == src_days, (
+        f"{code}: qlib {len(qlib_days)} 天 vs source {len(src_days)} 天 "
+        f"(窗口 {HISTORY_START}..{SEGMENTS['test'][1]}); "
+        f"only in qlib {sorted(qlib_days - src_days)[:5]}; "
+        f"only in source {sorted(src_days - qlib_days)[:5]}"
+    )
