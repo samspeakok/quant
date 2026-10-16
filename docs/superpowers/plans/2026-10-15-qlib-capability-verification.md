@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把本机 duckdb 里的 36 万行真实 A 股日线接入 Microsoft Qlib，并逐层验证「数据 → 表达式 → 因子 → 数据集 → 模型 → 回测」六层闭环是否真的可用。
+**Goal:** 把本机 duckdb 里的 31.5 万行真实 A 股日线（698 个标的）接入 Microsoft Qlib，并逐层验证「数据 → 表达式 → 因子 → 数据集 → 模型 → 回测」六层闭环是否真的可用。
 
 **Architecture:** 单向依赖的三层目录。`tools/` 是唯一的造数据层（duckdb 只读导出 → 官方 dump_bin → `.bin`），产出 `qlib_data/`；`tests/` 按层断言功能可用且不产出任何文件；`research/` 消费已验证的数据跑出真实回测产物。三者互不触发。
 
@@ -424,8 +424,9 @@ def main() -> int:
         con.close()
     report = write_csvs(df, EXPORT_CSV_DIR)
     print(report.as_text())
-    # 实测可用行 360,089；低于 90% 说明过滤条件或源库状态变了，必须硬失败
-    if report.rows_out < 360_089 * 0.9:
+    # 实测 CN + 1d + qfq 共 314,676 行（加 market 过滤前是 360,089）
+    # 低于 90% 说明过滤条件或源库状态变了，必须硬失败
+    if report.rows_out < 314_676 * 0.9:
         print("[error] exported row count far below expectation", file=sys.stderr)
         return 1
     return 0
@@ -653,7 +654,7 @@ if __name__ == "__main__":
 ./.venv/Scripts/python.exe tools/build_qlib_data.py
 ```
 
-Expected: dump_bin 跑完（360k 行、708 文件，约数分钟），打印 `pools: {'cn_stocks': 626, 'cn_etf': 62, 'cn_index': 10}`。若某池数字不同，**先查是数据变了还是分类规则错了，不许直接改测试里的期望值。**
+Expected: dump_bin 跑完（314,676 行、698 个 CSV 文件，约数分钟），打印 `pools: {'cn_stocks': 626, 'cn_etf': 62, 'cn_index': 10}`。若某池数字不同，**先查是数据变了还是分类规则错了，不许直接改测试里的期望值。**
 
 - [ ] **Step 5: 运行测试确认通过**
 
