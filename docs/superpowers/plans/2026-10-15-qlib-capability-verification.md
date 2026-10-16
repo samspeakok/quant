@@ -935,6 +935,14 @@ def test_gapped_symbol_alignment(db, pool_members):
     )
 ```
 
+**Task 4 的落地形态以 `tests/test_01_data_layer.py` 为准**，本节正文是设计意图，已被两轮修复超越。三个照抄本节会踩的坑：
+
+1. 源侧查询**必须**带 `<= SEGMENTS["test"][1]` 上界。实测 `SH601995` 不加是 351 天、加了是 348 天，多出的 2026-10-08/09/12 落在留出尾部——不加则 `==` 必失败。
+2. "Qlib NaN 且源库 0 行"是**验证通过的停牌配对**，计入 `checked`，不是 skip（`nan_verified` 计数器）。但"Qlib NaN 而源库有 bar"必须硬失败；"空帧"也必须失败——那是区间-数据错位信号。照抄旧的 `assert want` 会在真实停牌对上误报。
+3. 日历必须先按**有序列表**断言非空且严格递增，再降为集合。`qlib/data/data.py:675` 原样返回文件内容（不 `np.unique`、不排序），`:174` 的索引字典会让重复日静默保留最后一个索引；一开始就收 set 会吸收重复与乱序。
+
+已知遗留（Minor，最终审阅 triage）：`nan_verified` 只在失败信息里可见，绿色运行无从察觉；理论上 over-wide 的 instruments span 也会产出"NaN 且源库 0 行"而被判为已验证，可用"该停牌日前后都必须有源库 bar"来收紧。
+
 - [ ] **Step 3: 运行确认通过**
 
 ```bash
