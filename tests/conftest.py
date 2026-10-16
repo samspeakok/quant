@@ -49,13 +49,28 @@ def alpha158_handler(qlib_ready):
     `dataset` 要吃它 —— 定义在 tests/test_03_alpha_factors.py 里时，tests/test_04_dataset_split.py
     只会报 `fixture 'alpha158_handler' not found`。Alpha158 全池构建是本工程最慢的一步，
     session 级只建一次，后续断言全部复用同一个对象。
+
+    end_time 用 SEGMENTS["test"][1] 而不是简报的 SEGMENTS["valid"][1]：DatasetH.prepare(seg)
+    只是在 handler 已经载入内存的那一帧上按日期切片，不会回头再读数据层
+    （qlib/data/dataset/__init__.py:176 `_prepare_seg` -> `self.handler.fetch(slc)`）。
+    按简报只载到 2025-12-31 时，test 段（2026-01-01..2026-09-30）实测直接空掉：
+    `AssertionError: test is empty`，并连带 `ValueError: min()/max() iterable argument is empty`。
+    留出尾部 HELDOUT_START 之后仍然不载进来。
     """
     from qlib.contrib.data.handler import Alpha158
 
     return Alpha158(
         instruments="cn_stocks",
         start_time=HISTORY_START,
-        end_time=SEGMENTS["valid"][1],
+        end_time=SEGMENTS["test"][1],
         fit_start_time=HISTORY_START,
         fit_end_time=SEGMENTS["train"][1],
     )
+
+
+@pytest.fixture(scope="session")
+def dataset(alpha158_handler):
+    """Task 7 产出、Task 8/9 复用的切分数据集（同样必须是 session 级、放 conftest）。"""
+    from qlib.data.dataset import DatasetH
+
+    return DatasetH(alpha158_handler, segments=SEGMENTS)
