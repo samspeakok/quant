@@ -43,6 +43,17 @@ docs/superpowers/      设计文档与 11 任务计划（含全部实测坑）
 `pytest` 默认就是严格 warning 模式（`pytest.ini` 里 `filterwarnings = error`），只豁免一条点名的
 上游噪音，理由写在 `pytest.ini` 注释里。想看完整警告列表：`pytest -W default`。
 
+实测状态（2026-10-16）：`pytest tests/` 在严格模式下 **102 passed / 535s**，
+除那一条被点名的上游 RuntimeWarning 外**没有任何其他警告**。
+配置本身也做了变异验证（故意注入一条 `DeprecationWarning` → 当场 FAILED），
+所以"error 模式生效"不是读配置读出来的，是试出来的。
+
+**两条独立的验证链互为对照**：`research/` 自己重算全部结论数字（不 import `tests/`、
+不抄常量），结果与 `tests/` 的钉桩逐项一致 —— 51 轮、谷底第 1 轮、每段 5 档分值、
+两段 IC 与零分布 sd/分位、并列规模、`cum_return`、混合费率；
+唯一差异在 `cum_return` 的第 15 位小数（浮点求和顺序级），比带宽小十一个数量级。
+也就是说这条曲线是被两边各自量出来的，不是抄出来的。
+
 ## 六层实测结论
 
 | 层 | 判据文件 | 结论 | 关键实测数字 / 判据 |
