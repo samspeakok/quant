@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -105,3 +106,87 @@ def dataset(alpha158_handler):
     from qlib.data.dataset import DatasetH
 
     return DatasetH(alpha158_handler, segments=SEGMENTS)
+
+
+def _use_temporary_mlflow_store(path: Path) -> None:
+    """把 qlib 的实验跟踪指到一个临时的本地目录，绕开 mlflow 3.x 对文件后端的硬拒绝。
+
+    这不是"顺手加的配置"，是 `LGBModel.fit` 在本环境里**跑不完**的直接后果，实测链条：
+    `qlib/contrib/model/gbdt.py:90` 在 fit 结尾无条件 `R.log_metrics(...)`
+    -> `qlib/workflow/__init__.py:590` -> `qlib/workflow/expm.py:327` `MlflowClient(tracking_uri=None)`
+    -> mlflow 回落默认 `./mlruns` -> `mlflow/store/tracking/file_store.py:224`（开关判定）/`:225`（抛出）
+    `MlflowException: The filesystem tracking backend (e.g., './mlruns') is in maintenance mode ...`
+    （装的 mlflow 是 3.17.1，官方只留了一个开关 `MLFLOW_ALLOW_FILE_STORE=true`）。
+    因为文件后端被拒，qlib 连实验都建不出来，fit 会带着**已经训好的树**整段抛异常
+    （RED 里 [2] 轮就已 early stop，异常发生在之后的 metrics 落盘上）。
+
+    开关按官方要求打开；目录走 **qlib 自己的** `R.set_uri()`（写进 `C.exp_manager["kwargs"]["uri"]`），
+    不能用 `mlflow.set_tracking_uri()` —— 实测 `qlib/workflow/recorder.py:337` 在起 recorder 时会
+    `mlflow.set_tracking_uri(self.uri)`，而 `self.uri` 就是 ExpManager 的 default_uri（今天默认 None），
+    于是 mlflow 的全局值被 qlib 原样覆盖回 `./mlruns`（第一版这么写过，仓库根因此多出 mlruns/ 实验目录，
+    已实测确认并改掉）。跟踪目录用 pytest 的 session 临时目录：模型层要验的是 fit/predict，
+    跟踪日志是纯副产物，既不往仓库根扔东西，也不占 `artifacts/`（那是研究产出目录）。
+    """
+    from qlib.workflow import R
+
+    os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
+    R.set_uri(str(path))
+
+
+@pytest.fixture(scope="session")
+def trained_model(dataset, tmp_path_factory):
+    """Task 8 产出、Task 9 复用的 LightGBM 模型；简报参数表 = qlib baseline YAML 里的那套。
+
+    fit 用的是 learn 帧（`gbdt.py:37` `data_key=DataHandlerLP.DK_L`）：Alpha158 的 learn 链是
+    DropnaLabel + CSZScoreNorm(fields_group="label")，所以**标签**被按日横截面标准化
+    （实测 std 0.9979）、标签为 NaN 的行被丢掉（实测 train 段 38313 行里有 53 行 NaN 标签，
+    进 LightGBM 的是 38260 行），而 158 列**特征仍是原始、未归一化、含 NaN** 的那一帧
+    （实测 95206 个 NaN 单元格，VWAP0 整列仍全 NaN），由 LightGBM 自己原生吸收缺失值。
+    早停的验证集是 **valid**（`_prepare_data` 把 train/valid 都塞进 valid_sets），所以 valid
+    的数字天然偏乐观，样本外只能看 test。实测早停停在第 2 轮 -> 模型只有 2 棵树。
+    """
+    from qlib.contrib.model.gbdt import LGBModel
+
+    _use_temporary_mlflow_store(tmp_path_factory.mktemp("mlflow-runs"))
+    model = LGBModel(
+        loss="mse",
+        colsample_bytree=0.8879,
+        learning_rate=0.2,
+        subsample=0.8789,
+        lambda_l1=205.6999,
+        lambda_l2=580.9768,
+        max_depth=8,
+        num_leaves=210,
+        num_threads=8,
+    )
+    model.fit(dataset)
+    # fit 通过 R.log_metrics 留下了一个活跃实验/运行；`qlib/workflow/utils.py:28` 注册了
+    # `atexit.register(R.end_exp, ...)`，于是 qlib 会在**解释器退出时**（pytest 早已关掉输出捕获）
+    # 再写一条 timer 日志，表现为 session 结束后一串 "--- Logging error --- ValueError:
+    # I/O operation on closed file"。这里在 fixture 内当场把实验收尾，atexit 钩子就不会再触发
+    # （qlib 自己的注释："will not take effect if experiment ends"）。
+    from qlib.workflow import R
+    from qlib.workflow.recorder import Recorder
+
+    R.end_exp(Recorder.STATUS_FI)
+    return model
+
+
+@pytest.fixture(scope="session")
+def predictions(trained_model, dataset):
+    """Task 8 交付给 Task 9 的打分帧：`{段名: pd.Series}`，段为 valid / test。
+
+    **真实返回类型是 pd.Series，不是 DataFrame**：`qlib/contrib/model/gbdt.py:92-96`
+    `predict(self, dataset: DatasetH, segment: Union[Text, slice] = "test")` 里面是
+    `pd.Series(self.model.predict(x_test.values), index=x_test.index)`，没有列名。
+    所以简报里那行 `predictions[seg].iloc[:, 0]` 会当场 IndexError，Task 9 应直接
+    `signal=predictions["test"]`（qlib 自己接受 Series 信号：`qlib/backtest/signal.py:102`
+    `isinstance(obj, (pd.DataFrame, pd.Series))`），要帧就 `.to_frame("score")`，别再写 `.iloc[:, 0]`。
+    本 fixture 不替它包装成 DataFrame —— 保持模型层的原生产出，索引是 `['datetime','instrument']`。
+
+    Task 9 必须知道的实测形态：2 棵树的模型在 27388 / 90008 行上只给出 **30 个不同的分值**
+    （值域 -0.0243..0.0727，因为训练目标是按日横截面标准化过的标签，分数就在 z 分尺度上）。
+    TopkDropoutStrategy(topk=30) 因此是在**大量并列**里挑标的，选中谁很大程度上取决于
+    qlib 的排序稳定性，而不是模型意见 —— 回测结论要把这件事写清楚。
+    """
+    return {seg: trained_model.predict(dataset, segment=seg) for seg in ("valid", "test")}
