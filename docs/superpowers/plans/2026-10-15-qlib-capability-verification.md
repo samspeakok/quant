@@ -798,7 +798,12 @@ def test_calendar_contains_no_foreign_trading_days(db):
     非 CN 标的混入会带来幽灵交易日，让所有 A 股在该日全为 NaN。"""
     from qlib.data import D
 
-    cal = {d.strftime("%Y-%m-%d") for d in D.calendar()}
+    cal_list = list(D.calendar())
+    # 必须先按有序列表断言，再降为集合：qlib data.py:675 是原样返回文件内容，
+    # 既不 np.unique 也不排序，:174 的索引字典还会让重复日静默保留最后一个索引。
+    # 若一开始就收成 set，重复日与乱序日会被吸收而 cal == src 照样通过。
+    assert cal_list and cal_list == sorted(set(cal_list)), "calendar not strictly increasing"
+    cal = {d.strftime("%Y-%m-%d") for d in cal_list}
     src = {
         r[0]
         for r in db.execute(
@@ -887,7 +892,7 @@ def test_close_matches_source_database(db, pool_members):
         assert abs(qlib_v - src_v) <= abs(src_v) * 1e-6 + 1e-9, f"{code} {day}: qlib={qlib_v} source={src_v}"
         checked += 1
 
-    assert checked >= 50, f"only {checked} pairs compared; sampling is broken"
+    assert checked == len(picked), f"only {checked}/{len(picked)} compared; skipped={skipped}"
 
 
 def test_gapped_symbol_alignment(db, pool_members):
@@ -922,7 +927,12 @@ def test_gapped_symbol_alignment(db, pool_members):
     qlib_days = {
         d.strftime("%Y-%m-%d") for d in df.index.get_level_values("datetime").unique()
     }
-    assert qlib_days <= src_days, f"qlib reports days absent from source: {sorted(qlib_days - src_days)[:5]}"
+    # 双向：只断言 <= 就永远证明不了"Qlib 不会丢掉源库有的日子"（静默丢数据那一类）。
+    # 源侧查询必须同样加 <= SEGMENTS["test"][1] 上界 —— 实测不加就是 351 vs 348，
+    # 多出的 2026-10-08/09/12 落在留出尾部，不是数据缺失。
+    assert qlib_days == src_days, (
+        f"only-in-qlib={sorted(qlib_days - src_days)[:5]} only-in-source={sorted(src_days - qlib_days)[:5]}"
+    )
 ```
 
 - [ ] **Step 3: 运行确认通过**
