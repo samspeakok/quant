@@ -18,12 +18,14 @@
 - **本机未配置 git 身份，用户明确决定暂不配置。** 因此每个任务的最后一步只做 `git add <具体文件>` 暂存，**不执行 `git commit`**。全部任务完成后由用户给出身份再统一提交。
 - Python 一律用 `./.venv/Scripts/python.exe`（Windows + Git Bash）。系统 Python 3.12.10 不带 qlib。
 - **`market.duckdb` 正被主系统持续写入，同目录有 `housekeeping.lock`。所有连接必须 `read_only=True`，只执行 SELECT。** 任何写操作、`CHECKPOINT`、`VACUUM` 都禁止。产物只落在本目录。
-- 数据过滤条件固定：`frequency = '1d' AND adjust = 'qfq' AND market = 'CN'`。
+- 数据过滤条件固定：`frequency = '1d' AND adjust = 'qfq' AND market = 'CN'`，再加时间下界 `ts >= HISTORY_START`。
+- **实测基数（收窄后）**：194,738 行 / 698 个标的 / **529 个交易日**。不加时间下界时是 314,676 行但日历被指数的 1990 年数据撑到 **8,741 天**，而 A 股只覆盖其中约 500 天 —— 每个 `.bin` 数组都会被 NaN 填满。收窄后标的数不变（698），NaN 填充降一个数量级。
 - Qlib 区域固定 `region='cn'`，频率固定 `freq='day'`。
 - 符号格式：duckdb 侧 `600519.SH`，Qlib 侧 `SH600519`。
 - 标的池按**代码前缀规则**分类，**不使用 `asset_type` 列** —— 实测 `000001.SH`（上证指数）与 `000905.SH`（中证500）同时被标成 `stock` 和 `index`，按标签分池会把指数当股票买入，而指数没有可成交价，会凭空抬高回测收益。
 - 三个 instrument 池 `cn_stocks` / `cn_etf` / `cn_index` 绝不合并。
-- 日期区间：train 2018-01-01~2022-12-31、valid 2023-01-01~2023-12-31、test 2024-01-01~2025-12-31。**2026 年数据不进入任何区间**，留作样本外参照。
+- 日期区间（2026-10-15 依实测数据重定，见下方"数据现实"）：train 2025-01-01~2025-08-31、valid 2025-09-01~2025-12-31、test 2026-01-01~2026-09-30，`HISTORY_START = 2024-08-05`。**每个区间右端都留出的尾部数据（2026-10-01~2026-10-14）不进任何区间**，保持一段真正的样本外参照。
+- **数据现实（实测，推翻了初版计划的区间设定）**：本库 A 股日线只从 2021-08-26 开始，且 2021/2022/2023 各只有 **1** 只标的，2024 年 55 只，2025 年 347 只，2026 年 642 只。ETF 有 2007→2026 的长历史但每年仅 8~10 只；指数 1990→2026 共 10 只且不可交易。因此**任何跨多年的股票训练窗口在这份数据上都不存在**，回测性能数字不具备可信度，本轮六层的判据是"机制是否真的跑通"，不是"策略是否赚钱"。补历史数据是后续独立工程。
 - 已核实的真实 API 参数名（不要按网络资料改回旧写法）：`dump_bin.py` 用 **`--data_path`**（不是 `--csv_path`）；`qlib.backtest.backtest(start_time, end_time, strategy, executor, benchmark, account, exchange_kwargs, pos_type)`；`DatasetH.prepare(segments, col_set=..., ...)`；`Alpha158.get_feature_config()` 返回 `([ops], [names])` 二元组。
 - Alpha158 的标签是 `Ref($close, -2)/Ref($close, -1) - 1`，**设计上就前看两天**。看到"用了未来数据"不要当 bug 修掉，它是预测目标本身。
 
@@ -146,13 +148,19 @@ def to_qlib_code(symbol: str) -> str:
 POOLS = {"cn_stocks": "stock", "cn_etf": "etf", "cn_index": "index"}
 
 BENCHMARK = "SH000300"
-HISTORY_START = "2016-01-01"
+# 股票数据实际从 2021-08-26 才开始，且 2021-2023 各只有 1 只标的；
+# 2024-08-05 起才有成批股票（当年 55 只、2025 年 347 只、2026 年 642 只）。
+# HISTORY_START 取 2024-08-05，给 Alpha158 的滚动窗口留出预热期。
+HISTORY_START = "2024-08-05"
 
 SEGMENTS = {
-    "train": ("2018-01-01", "2022-12-31"),
-    "valid": ("2023-01-01", "2023-12-31"),
-    "test": ("2024-01-01", "2025-12-31"),
+    "train": ("2025-01-01", "2025-08-31"),
+    "valid": ("2025-09-01", "2025-12-31"),
+    "test": ("2026-01-01", "2026-09-30"),
 }
+
+# 数据到今天 2026-10-14。这段尾部不进任何区间，作为真正的样本外参照。
+HELDOUT_START = "2026-10-01"
 ```
 
 - [ ] **Step 3: 写失败的测试 `tests/test_00_symbol_rule.py`**
@@ -234,10 +242,19 @@ def test_segments_are_ordered_and_disjoint():
     assert SEGMENTS["valid"][1] < SEGMENTS["test"][0]
 
 
-def test_2026_is_excluded_from_every_segment():
-    """2026 年数据留作样本外，任何区间的右端点都不得触及它。"""
+def test_segments_are_the_exact_measured_windows():
+    """钉住四个端点。只断言顺序的话，整段窗口平移一年也照样全绿。"""
+    assert SEGMENTS == {
+        "train": ("2025-01-01", "2025-08-31"),
+        "valid": ("2025-09-01", "2025-12-31"),
+        "test": ("2026-01-01", "2026-09-30"),
+    }
+
+
+def test_heldout_tail_is_excluded_from_every_segment():
+    """数据到 2026-10-14，这段尾部不进任何区间，留作样本外参照。"""
     for name, (_start, end) in SEGMENTS.items():
-        assert end < "2026-01-01", f"{name} leaks into out-of-sample year"
+        assert end < HELDOUT_START, f"{name} leaks into the held-out tail"
 
 
 def test_pools_map_to_the_three_classifiers():
@@ -345,6 +362,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.settings import (  # noqa: E402
     DUCKDB_PATH,
     EXPORT_CSV_DIR,
+    HISTORY_START,
     SQL_FILTER,
     classify_symbol,
     to_qlib_code,
@@ -352,10 +370,14 @@ from config.settings import (  # noqa: E402
 
 FIELDS = ["open", "high", "low", "close", "volume", "amount"]
 
+# `ts` 是 TIMESTAMPTZ。直接 CAST 成 DATE 会按 UTC 取日，与 strftime 的本地取日不一致，
+# 差 8 小时就是差一个交易日 —— 那正是本项目要用交叉校验去抓的那类静默错位。
+# 因此在这里显式按 Asia/Shanghai 落到本地日历，且不依赖宿主机时区。
 QUERY = f"""
-    SELECT symbol, ts, {", ".join(FIELDS)}
+    SELECT symbol, ts AT TIME ZONE 'Asia/Shanghai' AS ts, {", ".join(FIELDS)}
     FROM bars
     WHERE {SQL_FILTER}
+      AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) >= '{HISTORY_START}'
 """
 
 
@@ -432,9 +454,9 @@ def main() -> int:
         con.close()
     report = write_csvs(df, EXPORT_CSV_DIR)
     print(report.as_text())
-    # 实测 CN + 1d + qfq 共 314,676 行（加 market 过滤前是 360,089）
+    # 实测（CN + 1d + qfq + ts>=HISTORY_START）= 194,738 行 / 698 标的 / 529 交易日
     # 低于 90% 说明过滤条件或源库状态变了，必须硬失败
-    if report.rows_out < 314_676 * 0.9:
+    if report.rows_out < 194_738 * 0.9:
         print("[error] exported row count far below expectation", file=sys.stderr)
         return 1
     return 0
@@ -521,7 +543,9 @@ pytestmark = pytest.mark.skipif(
 def test_calendar_is_strictly_increasing_and_unique():
     dates = Path(QLIB_DIR / "calendars" / "day.txt").read_text(encoding="utf-8").split()
     assert dates == sorted(set(dates))
-    assert len(dates) > 2000
+    # 收窄导出后日历应约 529 个交易日；若这里出现数千，说明时间下界没生效，
+    # 指数的 1990 年数据又把 NaN 填充撑回来了
+    assert 400 <= len(dates) <= 600, f"calendar has {len(dates)} days, expected ~529"
 
 
 def test_three_pool_files_exist_with_expected_sizes():
@@ -778,12 +802,15 @@ def test_calendar_contains_no_foreign_trading_days(db):
     src = {
         r[0]
         for r in db.execute(
-            "SELECT DISTINCT strftime(ts, '%Y-%m-%d') FROM bars "
-            "WHERE frequency='1d' AND adjust='qfq' AND market='CN' AND ts >= '2016-01-01'"
+            "SELECT DISTINCT strftime(CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE), '%Y-%m-%d') FROM bars "
+            "WHERE frequency='1d' AND adjust='qfq' AND market='CN' "
+            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) >= ?",
+            [HISTORY_START],
         ).fetchall()
     }
     ghost = cal - src
     assert not ghost, f"{len(ghost)} phantom trading days, e.g. {sorted(ghost)[:5]}"
+    assert cal == src, f"calendar does not cover the exported range: missing {sorted(src - cal)[:5]}"
 
 
 def test_benchmark_loads(db):
@@ -830,7 +857,7 @@ def test_close_matches_source_database(db, pool_members):
             continue
         want = db.execute(
             "SELECT close FROM bars WHERE symbol=? AND frequency='1d' AND adjust='qfq' AND market='CN' "
-            "AND CAST(ts AS DATE)=CAST(? AS DATE)",
+            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) = CAST(? AS DATE)",
             [from_qlib_code(code), day],
         ).fetchall()
         assert want, f"{code} {day}: qlib has a bar but the source database has none"
@@ -863,8 +890,9 @@ def test_gapped_symbol_alignment(db, pool_members):
     src_days = {
         r[0]
         for r in db.execute(
-            "SELECT DISTINCT strftime(ts, '%Y-%m-%d') FROM bars WHERE symbol=? "
-            "AND frequency='1d' AND adjust='qfq' AND market='CN' AND ts >= ?",
+            "SELECT DISTINCT strftime(CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE), '%Y-%m-%d') FROM bars "
+            "WHERE symbol=? AND frequency='1d' AND adjust='qfq' AND market='CN' "
+            "AND CAST(ts AT TIME ZONE 'Asia/Shanghai' AS DATE) >= ?",
             [from_qlib_code(code), HISTORY_START],
         ).fetchall()
     }
@@ -1172,10 +1200,14 @@ def test_feature_and_label_share_the_same_index(dataset):
     assert feat.index.equals(lab.index)
 
 
-def test_2026_is_absent_from_every_segment(dataset):
+def test_heldout_tail_absent_from_every_segment(dataset):
+    import pandas as pd
+
+    from config.settings import HELDOUT_START
+
     for name in SEGMENTS:
         days = dataset.prepare(name, col_set="feature").index.get_level_values("datetime")
-        assert max(days) < __import__("pandas").Timestamp("2026-01-01"), f"{name} leaks out-of-sample year"
+        assert max(days) < pd.Timestamp(HELDOUT_START), f"{name} leaks into the held-out tail"
 ```
 
 - [ ] **Step 2: 运行**
